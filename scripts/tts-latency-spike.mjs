@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Standalone measurement spike for Phase 1 of plans/260809-2300-restore-oral-tts-sse. Not part of
+// Standalone measurement spike for plans/260809-2300-restore-oral-tts-sse. Not part of
 // `npm test` (never require a live model to run the suite) and not shipped (tsc's `include` is
 // scoped to `src/`, so this file never reaches `out/` via `npm run compile`).
 //

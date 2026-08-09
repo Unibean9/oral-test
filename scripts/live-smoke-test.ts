@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Phase 7 live smoke test: exercises the real `claude` CLI for both skills (oral-examiner,
+ * Live smoke test: exercises the real `claude` CLI for both skills (oral-examiner,
  * oral-assessment-reviewer) end to end — no seam mock — and writes the full transcript (prompts,
  * raw CLI output, parsed questions/answers/review items, the rendered report) to
  * plans/260809-1724-oral-test-mvp-revised/reports/. Everything else in this repo's test suite
@@ -15,7 +15,7 @@
  * only runs 2 of the SWR blueprint's 15 questions (bounded real-CLI cost for a smoke test), then
  * force-completes the session before handing it to the reviewer skill.
  *
- * Usage: tsx scripts/live-phase7-smoke-test.ts
+ * Usage: tsx scripts/live-smoke-test.ts
  */
 import fs from 'node:fs';
 import os from 'node:os';

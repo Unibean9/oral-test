@@ -7,7 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "node out/server.js",
     "typecheck": "tsc --noEmit",
-    "compile": "tsc && node scripts/copy-assets.mjs",
+    "compile": "tsc",
     "test": "tsx src/test/e2e.ts",
     "ingest:demo": "tsx scripts/ingest-demo-chapters.ts"
   },

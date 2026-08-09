@@ -18,10 +18,6 @@ vars:
   # not shell quoting.
   VENV_PYTHON: '{{if eq OS "windows"}}{{.VENV_REL}}\Scripts\python.exe{{else}}{{.VENV_REL}}/bin/python{{end}}'
   SYSTEM_PYTHON: '{{if eq OS "windows"}}python{{else}}python3{{end}}'
-  # Same venv as the sidecar (both need the `vieneu` package), referenced relative to the
-  # fillers task's own working directory (assets/fillers) — two levels up to the repo root,
-  # then into tts-sidecar.
-  FILLERS_PYTHON: '{{if eq OS "windows"}}..\..\{{.SIDECAR_DIR}}\{{.VENV_REL}}\Scripts\python.exe{{else}}../../{{.SIDECAR_DIR}}/{{.VENV_REL}}/bin/python{{end}}'
 
 tasks:
   setup:
@@ -67,22 +63,5 @@ tasks:
     preconditions:
       - sh: test -f "{{.VENV_PYTHON}}"
         msg: "tts-sidecar venv not found — run `task setup` first."
-    # Runs fillers generation to completion first, not in parallel with the sidecar's own model
-    # load below — both would otherwise load VieNeu-TTS at the same time.
-    deps: [fillers]
     cmds:
       - '"{{.VENV_PYTHON}}" -m uvicorn app:app --host 127.0.0.1 --port 8765'
-
-  fillers:
-    internal: true
-    dir: assets/fillers
-    # Not committed (see .gitignore) — rendered here instead. generate_fillers.py itself
-    # skips any file that already exists at the right duration, so this check only exists to
-    # skip the ~15s model load entirely on the common case where all 60 clips are present.
-    status:
-      - test $(ls filler_*.wav 2>/dev/null | wc -l) -ge 60
-    preconditions:
-      - sh: test -f "{{.FILLERS_PYTHON}}"
-        msg: "tts-sidecar venv not found — run `task setup` first."
-    cmds:
-      - '"{{.FILLERS_PYTHON}}" generate_fillers.py'

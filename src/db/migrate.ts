@@ -47,8 +47,8 @@ function migrationV1(db: Database.Database): void {
   const schemaPath = path.resolve(__dirname, 'schema.sql');
   if (!fs.existsSync(schemaPath)) {
     throw new Error(
-      `Baseline schema not found at ${schemaPath}. In a compiled build this file is copied by ` +
-        `scripts/copy-assets.mjs — run \`npm run compile\` rather than \`tsc\` alone.`,
+      `Baseline schema not found at ${schemaPath}. A compiled build needs src/db/schema.sql ` +
+        `copied to out/db/schema.sql — \`tsc\` alone does not copy non-TypeScript files.`,
     );
   }
   db.exec(fs.readFileSync(schemaPath, 'utf8'));

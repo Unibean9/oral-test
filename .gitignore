@@ -15,10 +15,6 @@ CLAUDE.md
 **/__pycache__/
 *.pyc
 
-# Filler audio is rendered by `task dev`/`task setup` (assets/fillers/generate_fillers.py),
-# never committed — only the generator script and its source phrases are source-controlled.
-assets/fillers/*.wav
-
 # Node build output / install artifacts
 node_modules/
 out/
@@ -26,6 +22,9 @@ out/
 # Runtime data (SQLite DB, room artifacts) - regenerated, never shipped
 data/
 *.log
+
+# Source textbook PDFs for demo chapter ingestion - copyrighted, supplied locally, never shipped
+assets/*.pdf
 
 # Pre-migration DB snapshots (VACUUM INTO output), written next to the live DB file
 *.bak
