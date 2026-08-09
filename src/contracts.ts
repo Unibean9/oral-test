@@ -18,7 +18,18 @@ export const LIMITS = {
   // Budget for one-shot fresh-session invocations (oral-examiner, oral-assessment-reviewer).
   claudeArtifactTimeoutMs: 300_000,
   nameBytes: 200,
+  // Absolute cap for one /synthesize/stream call against tts-sidecar.
+  ttsTimeoutMs: 90_000,
 } as const;
+
+// Drift-check only (src/tts/streamClient.ts's checkVoiceDriftAtBoot) — no per-session voice
+// selection; every synthesis uses DEFAULT_VOICE_ID. Ids and labels must match
+// tts-sidecar/app.py's VOICE_PRESETS keys exactly.
+export const SUPPORTED_VOICES = [
+  { id: 'vi-female-01', label: 'Trúc Ly (nữ)' },
+  { id: 'vi-male-01', label: 'Phạm Tuyên (nam)' },
+] as const;
+export const DEFAULT_VOICE_ID: (typeof SUPPORTED_VOICES)[number]['id'] = 'vi-female-01';
 
 // Deliberately avoids a control-char escape regex literal (checked char-code-by-char-code
 // instead) - every ASCII control character (codes 0-31) plus DEL (127).

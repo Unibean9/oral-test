@@ -19,6 +19,9 @@ import { v4 as uuidv4 } from 'uuid';
 import Database from 'better-sqlite3';
 
 process.env.DB_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'oral-test-db-')), 'oral-test.db');
+// Unreachable on purpose: question/turn checks earlier in this file trigger background TTS
+// prefetch before the stub sidecar (below) is installed, and must never reach a real one.
+process.env.TTS_SIDECAR_URL = 'http://127.0.0.1:1';
 
 const claudeSpawn = await import('../claude-cli/spawn.js');
 const { wrapUntrusted, GROUNDING_TRAILER } = claudeSpawn;
@@ -124,7 +127,7 @@ await check('migration v1->v2 splits rooms into teachers/rooms/sessions, preserv
   legacy.pragma('user_version = 1');
   runMigrations(legacy);
 
-  assert.equal(legacy.pragma('user_version', { simple: true }), 8);
+  assert.equal(legacy.pragma('user_version', { simple: true }), 9);
   const sessions = legacy.prepare('SELECT * FROM sessions ORDER BY created_at ASC').all() as any[];
   assert.equal(sessions.length, 2);
   for (const session of sessions) assert.equal(session.name, session.session_id);
@@ -159,7 +162,7 @@ await check('migration v1->v2 splits rooms into teachers/rooms/sessions, preserv
 
   // Idempotency: a second pass changes nothing and does not throw.
   runMigrations(legacy);
-  assert.equal(legacy.pragma('user_version', { simple: true }), 8);
+  assert.equal(legacy.pragma('user_version', { simple: true }), 9);
   assert.equal((legacy.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n, 2);
   legacy.close();
 });
@@ -171,7 +174,7 @@ await check('migration v0->v1->v2 fills engine_step/message_id/turn_id at v1 bef
   v0.exec(`INSERT INTO rooms (room_id, created_at, current_phase, title, status, trace_may_be_incomplete) VALUES ('33333333-3333-3333-3333-333333333333', '2026-01-01T00:00:00.000Z', 'framing', NULL, 'active', 0)`);
   v0.pragma('user_version = 0');
   runMigrations(v0);
-  assert.equal(v0.pragma('user_version', { simple: true }), 8);
+  assert.equal(v0.pragma('user_version', { simple: true }), 9);
   const session = v0.prepare("SELECT * FROM sessions WHERE session_id = '33333333-3333-3333-3333-333333333333'").get() as any;
   assert.ok(session, 'v0 room reaches the v2 sessions table');
   assert.equal(session.engine_step, 0);
@@ -183,7 +186,7 @@ await check('migrating a brand-new empty DB reaches the latest version with zero
   const tmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'oral-migrate-')), 'fresh.db');
   const fresh = new Database(tmp);
   runMigrations(fresh);
-  assert.equal(fresh.pragma('user_version', { simple: true }), 8);
+  assert.equal(fresh.pragma('user_version', { simple: true }), 9);
   assert.equal((fresh.prepare('SELECT COUNT(*) AS n FROM teachers').get() as { n: number }).n, 0);
   assert.equal((fresh.prepare('SELECT COUNT(*) AS n FROM rooms').get() as { n: number }).n, 0);
   fresh.close();
@@ -195,7 +198,7 @@ await check('migration v7 seeds the oral-test taxonomy exactly once, is idempote
   runMigrations(fresh);
   runMigrations(fresh); // idempotency: re-running must not error or duplicate seed rows
 
-  assert.equal(fresh.pragma('user_version', { simple: true }), 8);
+  assert.equal(fresh.pragma('user_version', { simple: true }), 9);
   assert.deepEqual(fresh.pragma('foreign_key_check'), []);
 
   const bloomCount = (fresh.prepare('SELECT COUNT(*) AS n FROM bloom_levels').get() as { n: number }).n;
@@ -1060,6 +1063,199 @@ await check('oral-assessment-reviewer: a CLI timeout/rejection surfaces as a cle
     spawn.runRawFreshSession.setForTests(null);
   }
 });
+
+// ---------------------------------------------------------------------------------------
+// TTS speech job manager & SSE endpoint. One stub
+// sidecar per this test FILE (not per check) — its port is injected via the sidecarConfig seam,
+// never a per-check dynamic port against a captured constant. Every check resets both the job
+// registry (`_resetForTests`) and the stub's counters/forced-status/delay so checks stay
+// independent without needing a fresh server.
+// ---------------------------------------------------------------------------------------
+
+const { TtsSidecarStub } = await import('./fixtures/ttsSidecarStub.js');
+const { getSidecarBaseUrl } = await import('../tts/sidecarConfig.js');
+const { stripMarkdownForSpeech } = await import('../tts/textSanitize.js');
+const {
+  ensureJob, pumpSpeechJob, enqueueSpeechPrefetch, abortAllAndDrain,
+  _resetForTests: resetSpeechJobs, _setCacheConfigForTests,
+} = await import('../oral-session/questionSpeechJobs.js');
+
+const ttsStub = new TtsSidecarStub();
+const ttsStubBaseUrl = await ttsStub.listen();
+getSidecarBaseUrl.setForTests(() => ttsStubBaseUrl);
+
+async function resetSpeechTestState(): Promise<void> {
+  await resetSpeechJobs();
+  ttsStub.resetCounters();
+  ttsStub.forceStatus(null);
+  ttsStub.setFrameDelayMs(0);
+}
+
+async function seedInProgressSessionWithQuestion(teacherId: string, studentCode: string) {
+  const { createOralSession } = await import('../db/oralSessions.js');
+  const { createQuestion } = await import('../db/questions.js');
+  const { listSlotsForBlueprint } = await import('../db/blueprints.js');
+  const slots = listSlotsForBlueprint('bp_swr_demo_v1');
+  const session = createOralSession({ blueprintId: 'bp_swr_demo_v1', teacherId, studentCode });
+  const question = createQuestion({
+    sessionId: session.session_id, slotId: slots[0].slot_id, chapterId: slots[0].chapter_id, cloId: slots[0].clo_id,
+    bloomLevel: slots[0].bloom_level, sourceChunkIds: ['x'], questionText: 'Câu hỏi phát âm thanh?', promptVersion: 'v', modelVersion: 'm',
+  });
+  return { session, question };
+}
+
+await check('speech job manager synthesizes the whole question in one sidecar call (no per-sentence split)', async () => {
+  await resetSpeechTestState();
+  const longText = 'Câu một. Câu hai. TP. Hồ Chí Minh là câu ba.';
+  const job = ensureJob('q-whole', longText, 'foreground');
+  await job.settled;
+  assert.equal(job.state, 'done');
+  assert.equal(ttsStub.requestCount, 1, 'whole-question synthesis must be exactly one sidecar call');
+});
+
+await check('stripMarkdownForSpeech removes markdown formatting without altering spoken words', () => {
+  const input = '**Xin chào** — hãy đọc `code` và\n# Tiêu đề\n- mục 1\n- mục 2';
+  const out = stripMarkdownForSpeech(input);
+  assert.equal(out.includes('**'), false);
+  assert.equal(out.includes('#'), false);
+  assert.equal(out.includes('`'), false);
+  assert.equal(out.includes('Xin chào'), true);
+  assert.equal(out.includes('mục 1'), true);
+});
+
+await check('GET .../questions/:questionId/speech streams a full SSE sequence ending in speech-audio-done -> done', async () => {
+  await resetSpeechTestState();
+  const { cookie, teacherId } = await registerOralTeacher();
+  const { session, question } = await seedInProgressSessionWithQuestion(teacherId, 'SP001');
+  const res = await inject({
+    method: 'GET', url: `/api/v1/oral-test/sessions/${session.session_id}/questions/${question.question_id}/speech`, headers: { cookie },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['content-type'], 'text/event-stream; charset=utf-8');
+  const eventNames = res.payload.split('\n\n').filter(Boolean).map((frame) => /event: (\S+)/.exec(frame)?.[1]);
+  assert.deepEqual(eventNames, ['speech-audio-chunk', 'speech-audio-done', 'done']);
+  assert.equal(ttsStub.requestCount, 1);
+});
+
+await check('speech route 404s for an unknown question and 422s for one from a different session', async () => {
+  await resetSpeechTestState();
+  const { cookie, teacherId } = await registerOralTeacher();
+  const { session } = await seedInProgressSessionWithQuestion(teacherId, 'SP002');
+  const { question: otherQuestion } = await seedInProgressSessionWithQuestion(teacherId, 'SP002b');
+
+  const notFound = await inject({ method: 'GET', url: `/api/v1/oral-test/sessions/${session.session_id}/questions/does-not-exist/speech`, headers: { cookie } });
+  assert.equal(notFound.statusCode, 404);
+  assert.equal(notFound.json().error.code, 'question_not_found');
+
+  const notInSession = await inject({ method: 'GET', url: `/api/v1/oral-test/sessions/${session.session_id}/questions/${otherQuestion.question_id}/speech`, headers: { cookie } });
+  assert.equal(notInSession.statusCode, 422);
+  assert.equal(notInSession.json().error.code, 'question_not_in_session');
+});
+
+await check('two concurrent speech requests for the same question share one sidecar call (dedupe)', async () => {
+  await resetSpeechTestState();
+  const { cookie, teacherId } = await registerOralTeacher();
+  const { session, question } = await seedInProgressSessionWithQuestion(teacherId, 'SP003');
+  const url = `/api/v1/oral-test/sessions/${session.session_id}/questions/${question.question_id}/speech`;
+  const [a, b] = await Promise.all([inject({ method: 'GET', url, headers: { cookie } }), inject({ method: 'GET', url, headers: { cookie } })]);
+  assert.equal(a.statusCode, 200);
+  assert.equal(b.statusCode, 200);
+  assert.equal(ttsStub.requestCount, 1, 'exactly one sidecar call for two concurrent subscribers');
+});
+
+await check('a request after full completion replays cached audio with zero new sidecar calls', async () => {
+  await resetSpeechTestState();
+  const { cookie, teacherId } = await registerOralTeacher();
+  const { session, question } = await seedInProgressSessionWithQuestion(teacherId, 'SP004');
+  const url = `/api/v1/oral-test/sessions/${session.session_id}/questions/${question.question_id}/speech`;
+  const first = await inject({ method: 'GET', url, headers: { cookie } });
+  assert.equal(first.statusCode, 200);
+  assert.equal(ttsStub.requestCount, 1);
+  const second = await inject({ method: 'GET', url, headers: { cookie } });
+  assert.equal(second.statusCode, 200);
+  assert.equal(ttsStub.requestCount, 1, 'cache replay must not trigger a new sidecar call');
+  assert.equal(second.payload.includes('speech-audio-chunk'), true);
+});
+
+await check('a slow subscriber pump never blocks or truncates a concurrent fast subscriber (cursor pump + drain isolation)', async () => {
+  await resetSpeechTestState();
+  const job = ensureJob('q-slow-reader', 'câu hỏi cho người đọc chậm', 'foreground');
+  const fastChunks: Buffer[] = [];
+  const slowChunks: Buffer[] = [];
+  let releaseSlow: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseSlow = resolve; });
+  const fast = pumpSpeechJob(job, { onChunk: async (c) => { fastChunks.push(c); }, onDone: async () => {}, onFailed: async () => {}, onCancelled: async () => {} });
+  const slow = pumpSpeechJob(job, { onChunk: async (c) => { await gate; slowChunks.push(c); }, onDone: async () => {}, onFailed: async () => {}, onCancelled: async () => {} });
+  await fast.finished;
+  assert.equal(fastChunks.length, 1, 'fast subscriber must complete without waiting on the slow one');
+  assert.equal(slowChunks.length, 0, 'slow subscriber has not been released yet');
+  releaseSlow();
+  await slow.finished;
+  assert.equal(slowChunks.length, 1, 'slow subscriber eventually delivers the full audio once unblocked');
+});
+
+await check('a 429 (busy) response is retried; a 422 (bad request) is not', async () => {
+  await resetSpeechTestState();
+  ttsStub.forceStatus(429);
+  const busyJob = ensureJob('q-busy', 'câu hỏi bận', 'foreground');
+  const deadline = Date.now() + 5_000;
+  while (ttsStub.requestCount < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  busyJob.abort.abort();
+  await busyJob.settled;
+  assert.ok(ttsStub.requestCount >= 2, `429 must be retried at least once (calls=${ttsStub.requestCount})`);
+
+  ttsStub.resetCounters();
+  ttsStub.forceStatus(422);
+  const badJob = ensureJob('q-bad', 'câu hỏi sai', 'foreground');
+  await badJob.settled;
+  assert.equal(ttsStub.requestCount, 1, `422 must not be retried (calls=${ttsStub.requestCount})`);
+  assert.equal(badJob.state, 'failed');
+});
+
+await check('a still-queued background prefetch yields to a foreground request that arrives after it (scheduler priority)', async () => {
+  await resetSpeechTestState();
+  const occupying = ensureJob('q-occupy', 'occupies the scheduler', 'background');
+  const background = ensureJob('q-background', 'background question', 'background');
+  const foreground = ensureJob('q-foreground', 'foreground question', 'foreground');
+  await Promise.all([occupying.settled, background.settled, foreground.settled]);
+  assert.ok(foreground.runningAt! <= background.runningAt!, 'foreground must start no later than the still-queued background job');
+});
+
+await check('enqueueSpeechPrefetch swallows a synchronous throw instead of propagating it', () => {
+  assert.doesNotThrow(() => enqueueSpeechPrefetch({ question_id: 'q-throw', question_text: undefined } as any));
+});
+
+await check('abortAllAndDrain resolves within its timeout and aborts every in-flight job', async () => {
+  await resetSpeechTestState();
+  ttsStub.setFrameDelayMs(5_000); // long enough that this must rely on abort, not natural completion
+  const job = ensureJob('q-drain', 'câu hỏi rút gọn', 'foreground');
+  const startedAt = Date.now();
+  await abortAllAndDrain(500);
+  assert.ok(Date.now() - startedAt < 2_000, 'abortAllAndDrain must not wait out the full frame delay');
+  assert.equal(job.abort.signal.aborted, true);
+  ttsStub.setFrameDelayMs(0);
+});
+
+await check('cache eviction respects test-tiny maxCacheBytes/cacheTtlMs overrides', async () => {
+  await resetSpeechTestState();
+  _setCacheConfigForTests({ maxCacheBytes: 1, cacheTtlMs: 60_000, maxCacheCount: 200 });
+  try {
+    const jobG = ensureJob('q-evict-1', 'câu hỏi 1', 'foreground');
+    await jobG.settled;
+    const jobH = ensureJob('q-evict-2', 'câu hỏi 2', 'foreground'); // admission-time eviction: jobG's bytes already exceed the 1-byte budget
+    await jobH.settled;
+    const replay = ensureJob('q-evict-1', 'câu hỏi 1', 'foreground');
+    assert.notEqual(replay, jobG, 'jobG must have been evicted once its bytes exceeded the tiny budget, so a fresh job is created');
+    await replay.settled;
+    assert.ok(ttsStub.requestCount >= 3, 'the evicted question required a brand-new sidecar call to re-serve');
+  } finally {
+    _setCacheConfigForTests(null);
+  }
+});
+
+await resetSpeechTestState();
+await ttsStub.close();
+getSidecarBaseUrl.setForTests(null);
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`}`);
 if (failures > 0) process.exitCode = 1;

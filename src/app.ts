@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { oralAuthRoutes } from "./routes/oralAuth.js";
 import { blueprintRoutes } from "./routes/blueprints.js";
 import { oralSessionRoutes } from "./routes/oralSessions.js";
+import { oralSpeechRoutes } from "./routes/oralSpeech.js";
 import { reviewRoutes } from "./routes/reviews.js";
 import { registerAuthPlugin } from "./auth/jwt.js";
 import { apiError, apiOk } from "./contracts.js";
@@ -107,6 +108,7 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
   await app.register(oralAuthRoutes);
   await app.register(blueprintRoutes);
   await app.register(oralSessionRoutes);
+  await app.register(oralSpeechRoutes);
   await app.register(reviewRoutes);
 
   // Envelope, like everything else. These routes carry no API_PREFIX, but that is the only respect

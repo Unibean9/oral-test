@@ -2,6 +2,8 @@ import { buildApp, HOST, PORT } from "./app.js";
 import { terminateAllClaudeSessions } from "./claude-cli/spawn.js";
 import { db, DB_PATH } from "./db/connection.js";
 import { releaseSingleWriterLock } from "./db/singleWriterLock.js";
+import { abortAllAndDrain } from "./oral-session/questionSpeechJobs.js";
+import { checkVoiceDriftAtBoot } from "./tts/streamClient.js";
 
 // Route wiring lives in app.ts for app.inject() testability without binding a port;
 // everything below has a process-level side effect and stays here.
@@ -10,6 +12,9 @@ import { releaseSingleWriterLock } from "./db/singleWriterLock.js";
 // this module only releases it on shutdown.
 
 const app = await buildApp();
+
+// Never throws, never blocks startup — see checkVoiceDriftAtBoot's own doc comment.
+void checkVoiceDriftAtBoot().catch(() => {});
 
 // Node does not kill child processes on exit; without a signal handler, Ctrl-C leaves
 // the `claude` child running and never calls app.close(), so onClose never fires.
@@ -32,7 +37,14 @@ async function shutdown(reason: string, code = 0): Promise<void> {
     process.exit(1);
   }, FORCED_EXIT_MS);
   forced.unref();
-  terminateAllClaudeSessions();
+  terminateAllClaudeSessions({ shuttingDown: true });
+  // Bounded well under FORCED_EXIT_MS so a hung speech job can't itself exhaust the forced-exit
+  // deadline before app.close()/db.close() below even get a chance to run.
+  try {
+    await abortAllAndDrain(Math.max(0, FORCED_EXIT_MS - 1_000));
+  } catch (err) {
+    app.log.error({ err }, "error draining in-flight speech jobs");
+  }
   try {
     await app.close();
   } catch (err) {

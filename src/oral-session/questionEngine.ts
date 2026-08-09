@@ -6,6 +6,7 @@ import { createQuestion, listQuestionsForSession, type QuestionRow } from '../db
 import { getOralSession, endOralSession } from '../db/oralSessions.js';
 import { buildExaminerPrompt } from './promptBuilder.js';
 import { parseExaminerStateBlock, validateExaminerQuestionAgainstSlot, ExaminerStateParseError } from './stateParser.js';
+import { enqueueSpeechPrefetch } from './questionSpeechJobs.js';
 
 export const EXAMINER_PROMPT_VERSION = 'oral-examiner-v1';
 
@@ -24,14 +25,12 @@ function findNextPendingSlot(blueprintId: string, sessionId: string): BlueprintS
 }
 
 /**
- * Generates and persists the next question for a session, or completes the session if every
- * blueprint slot's question_count has been satisfied. Locked per session id (claude-cli/lock.ts,
- * generic — not brainstorm-specific) so two concurrent requests can't double-invoke the CLI for
- * the same session.
+ * The unlocked implementation, exported separately so submitTurn.ts can run it inside the SAME
+ * lock acquisition as the turn it just recorded (see that module's doc comment for why turn +
+ * next-question must be one atomic section, not two lock acquisitions back to back).
  */
-export async function askNextQuestion(sessionId: string): Promise<QuestionRow | null> {
-  return withRoomLock(sessionId, async () => {
-    const session = getOralSession(sessionId);
+export async function askNextQuestionLocked(sessionId: string): Promise<QuestionRow | null> {
+  const session = getOralSession(sessionId);
     if (!session) throw new Error('session_not_found');
     if (session.status !== 'in_progress') return null;
 
@@ -83,5 +82,20 @@ export async function askNextQuestion(sessionId: string): Promise<QuestionRow | 
       promptVersion: EXAMINER_PROMPT_VERSION,
       modelVersion: CLAUDE_MODEL,
     });
-  });
+}
+
+/**
+ * Generates and persists the next question for a session, or completes the session if every
+ * blueprint slot's question_count has been satisfied. Locked per session id (claude-cli/lock.ts,
+ * generic — not brainstorm-specific) so two concurrent requests can't double-invoke the CLI for
+ * the same session.
+ */
+export async function askNextQuestion(sessionId: string): Promise<QuestionRow | null> {
+  const question = await withRoomLock(sessionId, () => askNextQuestionLocked(sessionId));
+  // Strictly after the lock has released — enqueueSpeechPrefetch never blocks or delays a
+  // response, but scheduling it while the lock is still held would let a background prefetch
+  // occupy the sidecar's single inference slot ahead of an unrelated session's foreground
+  // request, since the sidecar has no concept of this app's per-session lock at all.
+  if (question) enqueueSpeechPrefetch(question);
+  return question;
 }
