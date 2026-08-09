@@ -1,10 +1,11 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
-# Root task runner (https://taskfile.dev) for the two projects that make up this product:
-# the backend (Fastify/TS, at repo root) and the tts-sidecar (Python/FastAPI). Task's own
-# shell interpreter runs these commands identically on Windows, macOS, and Linux — no
-# separate .ps1/.sh scripts needed. Install the `task` CLI once (brew/scoop/choco/npm), then:
-#   task setup   # first-time install for both projects
-#   task dev     # run both together
+# Root task runner (https://taskfile.dev) for the Fastify backend and Python TTS sidecar.
+# Install the `task` CLI once (brew/scoop/choco/npm), then:
+#   task setup   # install dependencies, migrate SQLite, and ingest the bundled demo PDFs
+#   task dev     # run both local services after setup
+#
+# Local PDF ingestion requires `pdftotext` from Poppler on PATH. Docker installs it in the seed
+# image automatically; install it through your OS package manager before running `task setup`.
 
 version: "3"
 
@@ -18,29 +19,109 @@ vars:
   # not shell quoting.
   VENV_PYTHON: '{{if eq OS "windows"}}{{.VENV_REL}}\Scripts\python.exe{{else}}{{.VENV_REL}}/bin/python{{end}}'
   SYSTEM_PYTHON: '{{if eq OS "windows"}}python{{else}}python3{{end}}'
+  VENV_REQUIREMENTS_MARKER: "{{.VENV_REL}}/.requirements-installed"
 
 tasks:
   setup:
-    desc: Install backend node_modules, and the tts-sidecar venv.
+    desc: Install dependencies, prepare the TTS venv, migrate SQLite, and ingest demo chapters.
+    deps: [backend:dependencies, venv]
     cmds:
-      - npm install
-      - task: venv
+      - task: init
+
+  init:
+    desc: Initialize the local SQLite database and ingest the bundled demo chapters.
+    deps: [backend:dependencies]
+    cmds:
+      - task: seed
+
+  seed:
+    desc: Idempotently ingest the five bundled demo chapters into the configured SQLite database.
+    deps: [backend:dependencies]
+    preconditions:
+      - sh: test -f assets/Software_Requirements_3rd_Edition.pdf
+        msg: "Missing assets/Software_Requirements_3rd_Edition.pdf; restore the bundled demo assets before seeding."
+      - sh: test -f assets/FOUNDATIONS_OF_SOFTWARE_TESTING_ISTQB_CE.pdf
+        msg: "Missing assets/FOUNDATIONS_OF_SOFTWARE_TESTING_ISTQB_CE.pdf; restore the bundled demo assets before seeding."
+      - sh: command -v pdftotext >/dev/null 2>&1
+        msg: "pdftotext (Poppler) is required for local demo seeding; install Poppler and retry."
+    cmds:
+      - npm run ingest:demo -- --pdf-dir assets
+      - task: check:seed-data
+
+  check:seed-data:
+    desc: Verify that every seeded demo chapter has at least one source chunk.
+    preconditions:
+      - sh: test -f "${DB_PATH:-data/rooms.db}"
+        msg: "SQLite database not found; run `task init` or `task setup` first."
+    cmds:
+      - |
+        node -e '
+        const Database = require("better-sqlite3");
+        const db = new Database(process.env.DB_PATH || "data/rooms.db", { readonly: true });
+        try {
+          const expected = ["SWR-1", "SWR-2", "SWR-3", "SWT-1", "SWT-3"];
+          const counts = new Map(db.prepare("SELECT chapter_id, COUNT(*) AS count FROM source_chunks GROUP BY chapter_id").all().map((row) => [row.chapter_id, row.count]));
+          const missing = expected.filter((chapterId) => !(counts.get(chapterId) > 0));
+          if (missing.length > 0) throw new Error(`missing source chunks for ${missing.join(", ")}`);
+          console.log(`[seed] verified ${expected.length} demo chapters`);
+        } finally { db.close(); }
+        '
+
+  check:claude:
+    desc: Verify that the local Claude CLI is installed, authenticated, and usable by the backend.
+    deps: [backend:dependencies]
+    cmds:
+      - npm run check:claude-cli
+
+  verify:
+    desc: Run static checks, the regression suite, and the local demo-seed verification.
+    deps: [backend:dependencies]
+    cmds:
+      - npm run typecheck
+      - npm test
+      - task: check:seed-data
+
+  backend:dependencies:
+    internal: true
+    status:
+      - test -f node_modules/.package-lock.json && test node_modules/.package-lock.json -nt package-lock.json && test node_modules/.package-lock.json -nt package.json
+    cmds:
+      - npm ci
 
   venv:
     internal: true
     dir: "{{.SIDECAR_DIR}}"
     status:
-      - test -f "{{.VENV_PYTHON}}"
+      - test -f "{{.VENV_PYTHON}}" && test -f "{{.VENV_REQUIREMENTS_MARKER}}" && test "{{.VENV_REQUIREMENTS_MARKER}}" -nt requirements.txt
     cmds:
       - '"{{.SYSTEM_PYTHON}}" -m venv "{{.VENV_REL}}"'
       - '"{{.VENV_PYTHON}}" -m pip install -r requirements.txt'
+      - touch "{{.VENV_REQUIREMENTS_MARKER}}"
 
   dev:
     desc: Run the backend and the tts-sidecar together (Ctrl+C stops both).
+    preconditions:
+      - sh: task check:seed-data
+        msg: "Demo source data is not ready; run `task setup` (first time) or `task init` first."
     deps: [dev:backend, dev:tts-sidecar]
 
+  docker:up:
+    desc: Build and run the API, TTS sidecar, and one-shot Docker seed service.
+    cmds:
+      - docker compose up --build --remove-orphans
+
+  docker:down:
+    desc: Stop Docker services while preserving the named runtime volumes.
+    cmds:
+      - docker compose down
+
+  docker:logs:
+    desc: Follow logs from Docker services.
+    cmds:
+      - docker compose logs --follow
+
   clear:
-    desc: Clear all build artifacts and node_modules/venv dirs.
+    desc: Clear local build artifacts, dependencies, venv, and runtime data.
     cmds:
       - rm -rf node_modules
       - rm -rf "{{.SIDECAR_DIR}}/{{.VENV_REL}}"
