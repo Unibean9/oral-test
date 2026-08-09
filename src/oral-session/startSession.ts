@@ -1,23 +1,27 @@
-import { getBlueprint } from '../db/blueprints.js';
+import { listBlueprintsByCourse } from '../db/blueprints.js';
 import { createOralSession, type AssessmentSessionRow } from '../db/oralSessions.js';
 import { askNextQuestion } from './questionEngine.js';
 import type { QuestionRow } from '../db/questions.js';
 
-export class BlueprintNotFoundError extends Error {
-  constructor(blueprintId: string) { super(`blueprint ${blueprintId} does not exist`); this.name = 'BlueprintNotFoundError'; }
+export class CourseHasNoBlueprintsError extends Error {
+  constructor(courseId: string) { super(`course ${courseId} has no blueprints`); this.name = 'CourseHasNoBlueprintsError'; }
 }
 
 /**
- * Starts a new oral-test session from a seeded blueprint (Phase 1 — no draft/authoring step
- * exists) and materializes its first question. No kiosk/device-handoff: this runs entirely
- * within the caller's own authenticated teacher session (Phase 2's ownershipGuard applies at the
- * route layer, not here).
+ * Starts a new oral-test session for a chosen course (subject). The teacher only picks the
+ * course — the specific blueprint is picked at random from that course's seeded blueprints
+ * (Phase 1 — no draft/authoring step exists), so a course with several blueprint variants rotates
+ * between them instead of always drawing the same exam. Materializes the first question. No
+ * kiosk/device-handoff: this runs entirely within the caller's own authenticated teacher session
+ * (Phase 2's ownershipGuard applies at the route layer, not here).
  */
 export async function startOralTestSession(params: {
-  blueprintId: string; teacherId: string; studentCode: string;
+  courseId: string; teacherId: string; studentCode: string;
 }): Promise<{ session: AssessmentSessionRow; firstQuestion: QuestionRow | null }> {
-  if (!getBlueprint(params.blueprintId)) throw new BlueprintNotFoundError(params.blueprintId);
-  const session = createOralSession(params);
+  const blueprints = listBlueprintsByCourse(params.courseId);
+  if (blueprints.length === 0) throw new CourseHasNoBlueprintsError(params.courseId);
+  const blueprint = blueprints[Math.floor(Math.random() * blueprints.length)];
+  const session = createOralSession({ blueprintId: blueprint.blueprint_id, teacherId: params.teacherId, studentCode: params.studentCode });
   const firstQuestion = await askNextQuestion(session.session_id);
   return { session, firstQuestion };
 }

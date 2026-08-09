@@ -4,7 +4,7 @@ import { ownershipGuard } from '../auth/ownershipGuard.js';
 import { RoomBusyError } from '../claude-cli/lock.js';
 import { getOralSession, resolveOralSessionOwner, listOralSessionsForTeacher, endOralSession } from '../db/oralSessions.js';
 import { listQuestionsForSession, getQuestion } from '../db/questions.js';
-import { startOralTestSession, BlueprintNotFoundError } from '../oral-session/startSession.js';
+import { startOralTestSession, CourseHasNoBlueprintsError } from '../oral-session/startSession.js';
 import { submitOralTurn, QuestionNotFoundError, QuestionNotInSessionError, SessionNotInProgressError } from '../oral-session/submitTurn.js';
 import { UngroundableSlotError } from '../oral-session/questionEngine.js';
 
@@ -28,7 +28,7 @@ function sessionOwner(req: FastifyRequest): string | undefined {
 /** Maps the oral-session engine's typed errors to the right HTTP status — every other error
  * escapes to app.ts's setErrorHandler as a generic 500. */
 function handleEngineError(err: unknown, reply: any): boolean {
-  if (err instanceof BlueprintNotFoundError) { reply.code(404).send(apiError('blueprint_not_found', err.message)); return true; }
+  if (err instanceof CourseHasNoBlueprintsError) { reply.code(404).send(apiError('course_not_found', err.message)); return true; }
   if (err instanceof QuestionNotFoundError) { reply.code(404).send(apiError('question_not_found', err.message)); return true; }
   if (err instanceof QuestionNotInSessionError) { reply.code(422).send(apiError('question_not_in_session', err.message)); return true; }
   if (err instanceof SessionNotInProgressError) { reply.code(409).send(apiError('session_not_in_progress', err.message)); return true; }
@@ -38,17 +38,17 @@ function handleEngineError(err: unknown, reply: any): boolean {
 }
 
 export async function oralSessionRoutes(app: FastifyInstance) {
-  app.post<{ Body: { blueprintId?: string; studentCode?: string } }>(
+  app.post<{ Body: { courseId?: string; studentCode?: string } }>(
     `${ORAL_TEST_PREFIX}/sessions`,
     { preHandler: app.authenticate },
     async (req, reply) => {
       const body = req.body ?? {};
-      const blueprintId = typeof body.blueprintId === 'string' ? body.blueprintId.trim() : '';
+      const courseId = typeof body.courseId === 'string' ? body.courseId.trim() : '';
       const studentCode = typeof body.studentCode === 'string' ? body.studentCode.trim() : '';
-      if (!blueprintId) return reply.code(422).send(apiError('invalid_blueprint_id', 'blueprintId is required'));
+      if (!courseId) return reply.code(422).send(apiError('invalid_course_id', 'courseId is required'));
       if (!studentCode || studentCode.length > 64) return reply.code(422).send(apiError('invalid_student_code', 'studentCode is required'));
       try {
-        const { session, firstQuestion } = await startOralTestSession({ blueprintId, teacherId: req.user.teacherId, studentCode });
+        const { session, firstQuestion } = await startOralTestSession({ courseId, teacherId: req.user.teacherId, studentCode });
         return reply.code(201).send(apiOk({
           sessionId: session.session_id, blueprintId: session.blueprint_id, status: session.status,
           startedAt: session.started_at, expiresAt: session.expires_at, question: questionDto(firstQuestion),

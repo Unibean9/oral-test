@@ -31,6 +31,11 @@ export function getBlueprint(blueprintId: string): BlueprintRow | undefined {
   return selectById.get(blueprintId) as BlueprintRow | undefined;
 }
 
+const selectByCourse = db.prepare('SELECT * FROM blueprints WHERE course_id = ? ORDER BY created_at ASC');
+export function listBlueprintsByCourse(courseId: string): BlueprintRow[] {
+  return selectByCourse.all(courseId) as BlueprintRow[];
+}
+
 const selectSlotsByBlueprint = db.prepare('SELECT * FROM blueprint_slots WHERE blueprint_id = ? ORDER BY chapter_id ASC, bloom_level ASC');
 export function listSlotsForBlueprint(blueprintId: string): BlueprintSlotRow[] {
   return selectSlotsByBlueprint.all(blueprintId) as BlueprintSlotRow[];

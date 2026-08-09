@@ -672,6 +672,20 @@ await check('GET /blueprints lists the seeded demo blueprints; there is no mutat
   assert.equal(mutate.statusCode, 404, 'no route registered to mutate blueprints');
 });
 
+await check('GET /courses lists the seeded demo courses', async () => {
+  const res = await inject({ method: 'GET', url: '/api/v1/oral-test/courses' });
+  assert.equal(res.statusCode, 200);
+  const ids = res.json().data.map((c: any) => c.courseId).sort();
+  assert.deepEqual(ids, ['SWR', 'SWT']);
+});
+
+await check('POST /sessions rejects a courseId with no seeded blueprints', async () => {
+  const { cookie } = await registerOralTeacher();
+  const res = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'NOPE', studentCode: 'SV099' } });
+  assert.equal(res.statusCode, 404);
+  assert.equal(res.json().error.code, 'course_not_found');
+});
+
 await check('POST /sessions requires auth, materializes a validated first question, and a submitted turn advances or completes it', async () => {
   const { upsertSourceChunk } = await import('../db/sourceChunks.js');
   const { createHash } = await import('node:crypto');
@@ -684,7 +698,7 @@ await check('POST /sessions requires auth, materializes a validated first questi
     upsertSourceChunk({ chapterId, pdfPage: 1, printedPage: 1, contentHash: createHash('sha256').update(text).digest('hex'), text, charStart: 0, charEnd: text.length });
   }
 
-  const noAuth = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', payload: { blueprintId: 'bp_swr_demo_v1', studentCode: 'SV001' } });
+  const noAuth = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', payload: { courseId: 'SWR', studentCode: 'SV001' } });
   assert.equal(noAuth.statusCode, 401);
 
   const { cookie } = await registerOralTeacher();
@@ -697,10 +711,11 @@ await check('POST /sessions requires auth, materializes a validated first questi
     return `<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slot0.slot_id, question_text: 'Câu hỏi kiểm tra?', bloom_level: slot0.bloom_level, source_chunk_ids: [chunkId], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`;
   });
   try {
-    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { blueprintId: 'bp_swr_demo_v1', studentCode: 'SV001' } });
+    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWR', studentCode: 'SV001' } });
     assert.equal(start.statusCode, 201);
     const body = start.json().data;
     assert.equal(body.status, 'in_progress');
+    assert.equal(body.blueprintId, 'bp_swr_demo_v1', 'the only SWR blueprint in this demo dataset must be the one randomly drawn');
     assert.ok(body.question, 'first question must be materialized synchronously');
     assert.equal(body.question.slotId, slot0.slot_id);
     assert.ok(body.question.sourceChunkIds.length > 0);
@@ -739,7 +754,7 @@ await check('a citation outside the assigned chunk set is rejected, never persis
   (spawn.runRawFreshSession as any).setForTests(async () =>
     `<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slot0.slot_id, question_text: 'x', bloom_level: slot0.bloom_level, source_chunk_ids: ['not-a-real-chunk-id'], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`);
   try {
-    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { blueprintId: 'bp_swt_demo_v1', studentCode: 'SV002' } });
+    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWT', studentCode: 'SV002' } });
     assert.equal(start.statusCode, 500, 'an out-of-scope citation must surface as a server error, not a 201 with a bad question');
     assert.equal(start.json().isSuccess, false);
   } finally {
@@ -758,7 +773,7 @@ await check('malformed skill JSON is rejected (no silent best-effort persist)', 
   const { cookie } = await registerOralTeacher();
   (spawn.runRawFreshSession as any).setForTests(async () => 'not even close to a state block');
   try {
-    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { blueprintId: 'bp_swt_demo_v1', studentCode: 'SV003' } });
+    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWT', studentCode: 'SV003' } });
     assert.equal(start.statusCode, 500);
   } finally {
     (spawn.runRawFreshSession as any).setForTests(null);
@@ -784,7 +799,7 @@ await check('prompt-injection text embedded in a source chunk does not break the
     return `<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slot0.slot_id, question_text: 'Câu hỏi bình thường?', bloom_level: slot0.bloom_level, source_chunk_ids: [match![1]], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`;
   });
   try {
-    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { blueprintId: 'bp_swr_demo_v1', studentCode: 'SV004' } });
+    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWR', studentCode: 'SV004' } });
     assert.equal(start.statusCode, 201);
     assert.equal(start.json().data.question.questionText, 'Câu hỏi bình thường?');
   } finally {
@@ -941,7 +956,7 @@ await check('teacher override + approve: only the approve route can set report/r
 // the full chapter/CLO/bloom/source_chunk provenance chain has no nulls anywhere in it.
 // ---------------------------------------------------------------------------------------
 
-async function runFullCoursePackE2E(blueprintId: string, chapterIds: string[], studentCode: string) {
+async function runFullCoursePackE2E(courseId: string, blueprintId: string, chapterIds: string[], studentCode: string) {
   const { upsertSourceChunk } = await import('../db/sourceChunks.js');
   const { createHash } = await import('node:crypto');
   const { listSlotsForBlueprint } = await import('../db/blueprints.js');
@@ -968,8 +983,9 @@ async function runFullCoursePackE2E(blueprintId: string, chapterIds: string[], s
   let sessionId: string;
   let questionId: string;
   try {
-    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { blueprintId, studentCode } });
+    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId, studentCode } });
     assert.equal(start.statusCode, 201);
+    assert.equal(start.json().data.blueprintId, blueprintId, 'this demo course has exactly one blueprint, so it must always be the one drawn');
     sessionId = start.json().data.sessionId;
     questionId = start.json().data.question.questionId;
 
@@ -1022,12 +1038,12 @@ async function runFullCoursePackE2E(blueprintId: string, chapterIds: string[], s
 }
 
 await check('SWR demo pack: full session (all slots) -> review -> approved report, every question carries complete provenance', async () => {
-  const { questionCount } = await runFullCoursePackE2E('bp_swr_demo_v1', ['SWR-1', 'SWR-2', 'SWR-3'], 'SV020');
+  const { questionCount } = await runFullCoursePackE2E('SWR', 'bp_swr_demo_v1', ['SWR-1', 'SWR-2', 'SWR-3'], 'SV020');
   assert.ok(questionCount > 0);
 });
 
 await check('SWT demo pack: full session (all slots) -> review -> approved report, every question carries complete provenance', async () => {
-  const { questionCount } = await runFullCoursePackE2E('bp_swt_demo_v1', ['SWT-1', 'SWT-3'], 'SV021');
+  const { questionCount } = await runFullCoursePackE2E('SWT', 'bp_swt_demo_v1', ['SWT-1', 'SWT-3'], 'SV021');
   assert.ok(questionCount > 0);
 });
 
@@ -1042,7 +1058,7 @@ await check('oral-examiner: a CLI timeout/rejection surfaces as a clean server e
   const { cookie } = await registerOralTeacher();
   spawn.runRawFreshSession.setForTests(async () => { throw new Error('claude deadline exceeded'); });
   try {
-    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { blueprintId: 'bp_swr_demo_v1', studentCode: 'SV022' } });
+    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWR', studentCode: 'SV022' } });
     assert.equal(start.statusCode, 500);
     assert.equal(start.json().isSuccess, false);
   } finally {

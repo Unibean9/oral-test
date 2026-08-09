@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { oralAuthRoutes } from "./routes/oralAuth.js";
 import { blueprintRoutes } from "./routes/blueprints.js";
+import { courseRoutes } from "./routes/courses.js";
 import { oralSessionRoutes } from "./routes/oralSessions.js";
 import { oralSpeechRoutes } from "./routes/oralSpeech.js";
 import { reviewRoutes } from "./routes/reviews.js";
@@ -107,6 +108,7 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
   await registerAuthPlugin(app);
   await app.register(oralAuthRoutes);
   await app.register(blueprintRoutes);
+  await app.register(courseRoutes);
   await app.register(oralSessionRoutes);
   await app.register(oralSpeechRoutes);
   await app.register(reviewRoutes);
