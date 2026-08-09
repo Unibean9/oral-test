@@ -929,5 +929,137 @@ await check('teacher override + approve: only the approve route can set report/r
   assert.ok(html.body.includes('Trả lời đầy đủ và chính xác cho câu 1.'), 'cited evidence turn text must render');
 });
 
+// ---------------------------------------------------------------------------------------
+// Phase 7: full course-pack E2E (blueprint -> session -> every slot's questions -> review ->
+// approved report), and the timeout/retry contract case for both skills. The SWR pack already
+// gets equivalent coverage split across the Phase 4/5 checks above (real HTTP through one turn,
+// then a DB-seeded completed session for review/approve) — this adds the one continuous,
+// all-slots-to-completion run per demo pack the plan's acceptance criteria call for, and asserts
+// the full chapter/CLO/bloom/source_chunk provenance chain has no nulls anywhere in it.
+// ---------------------------------------------------------------------------------------
+
+async function runFullCoursePackE2E(blueprintId: string, chapterIds: string[], studentCode: string) {
+  const { upsertSourceChunk } = await import('../db/sourceChunks.js');
+  const { createHash } = await import('node:crypto');
+  const { listSlotsForBlueprint } = await import('../db/blueprints.js');
+  const spawn = await import('../claude-cli/spawn.js');
+
+  for (const chapterId of chapterIds) {
+    const text = `pack-${chapterId}-${uuidv4()}`;
+    upsertSourceChunk({ chapterId, pdfPage: 1, printedPage: 1, contentHash: createHash('sha256').update(text).digest('hex'), text, charStart: 0, charEnd: text.length });
+  }
+  const { cookie } = await registerOralTeacher();
+  const slots = listSlotsForBlueprint(blueprintId);
+  const totalQuestions = slots.reduce((sum, s) => sum + s.question_count, 0);
+
+  // Answers the currently-pending slot each call, reading slot_id/bloom_level/chunk_id straight
+  // back out of the prompt this session's own promptBuilder produced — a faithful stand-in for
+  // "the real skill reads its assigned context and cites it", without invoking the CLI.
+  spawn.runRawFreshSession.setForTests(async (_ctx, prompt) => {
+    const slotId = prompt.match(/"slot_id":\s*"([^"]+)"/)?.[1];
+    const bloomLevel = prompt.match(/"bloom_level":\s*"([^"]+)"/)?.[1];
+    const chunkId = prompt.match(/"chunk_id":\s*"([^"]+)"/)?.[1];
+    assert.ok(slotId && bloomLevel && chunkId, 'prompt must carry slot_id/bloom_level/chunk_id for the mock to answer faithfully');
+    return `<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slotId, question_text: `Câu hỏi cho ${slotId}?`, bloom_level: bloomLevel, source_chunk_ids: [chunkId], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`;
+  });
+  let sessionId: string;
+  let questionId: string;
+  try {
+    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { blueprintId, studentCode } });
+    assert.equal(start.statusCode, 201);
+    sessionId = start.json().data.sessionId;
+    questionId = start.json().data.question.questionId;
+
+    for (let asked = 1; asked < totalQuestions; asked += 1) {
+      const turn = await inject({ method: 'POST', url: `/api/v1/oral-test/sessions/${sessionId}/turns`, headers: { cookie }, payload: { questionId, inputMode: 'typed', text: `Trả lời số ${asked} của học sinh.` } });
+      assert.equal(turn.statusCode, 201);
+      assert.ok(turn.json().data.nextQuestion, `question ${asked + 1} of ${totalQuestions} must follow`);
+      questionId = turn.json().data.nextQuestion.questionId;
+    }
+    // The last turn completes the session: no next question, status flips to completed.
+    const lastTurn = await inject({ method: 'POST', url: `/api/v1/oral-test/sessions/${sessionId}/turns`, headers: { cookie }, payload: { questionId, inputMode: 'typed', text: 'Trả lời cuối cùng của học sinh.' } });
+    assert.equal(lastTurn.statusCode, 201);
+    assert.equal(lastTurn.json().data.nextQuestion, null, 'the final slot must not produce another question');
+  } finally {
+    spawn.runRawFreshSession.setForTests(null);
+  }
+
+  const { listQuestionsForSession } = await import('../db/questions.js');
+  const questions = listQuestionsForSession(sessionId);
+  assert.equal(questions.length, totalQuestions);
+  for (const q of questions) {
+    assert.ok(q.chapter_id, 'chapter_id must not be null');
+    assert.ok(q.clo_id, 'clo_id must not be null');
+    assert.ok(q.bloom_level, 'bloom_level must not be null');
+    assert.ok(JSON.parse(q.source_chunk_ids).length > 0, 'source_chunk_ids must not be empty');
+    assert.ok(chapterIds.includes(q.chapter_id), 'chapter_id must be one of this pack\'s demo chapters');
+  }
+
+  const { listTurnsForQuestion } = await import('../db/questions.js');
+  const items = questions.map((q) => ({
+    question_id: q.question_id,
+    ai_suggested_level: '3',
+    evidence_turn_ids: listTurnsForQuestion(q.question_id).map((t) => t.turn_id),
+    rationale: `Đánh giá cho ${q.question_id}.`,
+  }));
+  spawn.runRawFreshSession.setForTests(async () => reviewOutputBlock(items));
+  try {
+    const reviewed = await inject({ method: 'POST', url: `/api/v1/oral-test/sessions/${sessionId}/review`, headers: { cookie } });
+    assert.equal(reviewed.statusCode, 201);
+    assert.equal(reviewed.json().data.items.length, totalQuestions);
+  } finally {
+    spawn.runRawFreshSession.setForTests(null);
+  }
+
+  const approve = await inject({ method: 'PATCH', url: `/api/v1/oral-test/sessions/${sessionId}/report/approve`, headers: { cookie } });
+  assert.equal(approve.statusCode, 200);
+  const report = await inject({ method: 'GET', url: `/api/v1/oral-test/sessions/${sessionId}/report`, headers: { cookie } });
+  assert.equal(report.json().data.status, 'approved');
+  return { sessionId, questionCount: totalQuestions };
+}
+
+await check('SWR demo pack: full session (all slots) -> review -> approved report, every question carries complete provenance', async () => {
+  const { questionCount } = await runFullCoursePackE2E('bp_swr_demo_v1', ['SWR-1', 'SWR-2', 'SWR-3'], 'SV020');
+  assert.ok(questionCount > 0);
+});
+
+await check('SWT demo pack: full session (all slots) -> review -> approved report, every question carries complete provenance', async () => {
+  const { questionCount } = await runFullCoursePackE2E('bp_swt_demo_v1', ['SWT-1', 'SWT-3'], 'SV021');
+  assert.ok(questionCount > 0);
+});
+
+await check('oral-examiner: a CLI timeout/rejection surfaces as a clean server error, with no question persisted', async () => {
+  const { upsertSourceChunk } = await import('../db/sourceChunks.js');
+  const { createHash } = await import('node:crypto');
+  const spawn = await import('../claude-cli/spawn.js');
+  for (const chapterId of ['SWR-1', 'SWR-2', 'SWR-3']) {
+    const text = `timeout-seed-${chapterId}-${uuidv4()}`;
+    upsertSourceChunk({ chapterId, pdfPage: 1, printedPage: 1, contentHash: createHash('sha256').update(text).digest('hex'), text, charStart: 0, charEnd: text.length });
+  }
+  const { cookie } = await registerOralTeacher();
+  spawn.runRawFreshSession.setForTests(async () => { throw new Error('claude deadline exceeded'); });
+  try {
+    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { blueprintId: 'bp_swr_demo_v1', studentCode: 'SV022' } });
+    assert.equal(start.statusCode, 500);
+    assert.equal(start.json().isSuccess, false);
+  } finally {
+    spawn.runRawFreshSession.setForTests(null);
+  }
+});
+
+await check('oral-assessment-reviewer: a CLI timeout/rejection surfaces as a clean server error, with no report persisted', async () => {
+  const spawn = await import('../claude-cli/spawn.js');
+  const { cookie, teacherId } = await registerOralTeacher();
+  const { session } = await seedCompletedOralSession(teacherId, 'SV023');
+  spawn.runRawFreshSession.setForTests(async () => { throw new Error('claude deadline exceeded'); });
+  try {
+    const res = await inject({ method: 'POST', url: `/api/v1/oral-test/sessions/${session.session_id}/review`, headers: { cookie } });
+    assert.equal(res.statusCode, 500);
+    assert.equal(await getReportForSessionTest(session.session_id), undefined, 'no report row must be left behind by a failed review call');
+  } finally {
+    spawn.runRawFreshSession.setForTests(null);
+  }
+});
+
 console.log(`\n${failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`}`);
 if (failures > 0) process.exitCode = 1;
