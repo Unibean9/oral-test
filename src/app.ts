@@ -2,18 +2,12 @@ import Fastify, { type FastifyInstance } from "fastify";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { fillerRoutes } from "./routes/fillers.js";
-import { brainstormSessionRoutes } from "./routes/brainstormSessions.js";
-import { sessionArtifactRoutes } from "./routes/sessionArtifacts.js";
-import { teacherRoomRoutes } from "./routes/teacherRooms.js";
-import { cloudSyncRoutes } from "./routes/cloudSync.js";
-import { teacherArchiveRoutes } from "./routes/teacherArchive.js";
 import { oralAuthRoutes } from "./routes/oralAuth.js";
 import { blueprintRoutes } from "./routes/blueprints.js";
 import { oralSessionRoutes } from "./routes/oralSessions.js";
 import { reviewRoutes } from "./routes/reviews.js";
 import { registerAuthPlugin } from "./auth/jwt.js";
-import { apiError, apiOk } from "./brainstorm/contracts.js";
+import { apiError, apiOk } from "./contracts.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -78,8 +72,8 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
       reply
         .header("access-control-allow-origin", origin)
         .header("vary", "Origin")
-        .header("access-control-allow-methods", "GET,POST,PATCH,OPTIONS")
-        .header("access-control-allow-headers", "content-type,accept,x-teacher-id");
+        .header("access-control-allow-methods", "GET,POST,PUT,PATCH,OPTIONS")
+        .header("access-control-allow-headers", "content-type,accept");
     } else if (origin && request.method !== "GET" && request.method !== "OPTIONS") {
       return reply.code(403).send(apiError("forbidden_origin", "This origin may not make state-changing requests"));
     }
@@ -110,12 +104,6 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
   );
 
   await registerAuthPlugin(app);
-  await app.register(brainstormSessionRoutes);
-  await app.register(sessionArtifactRoutes);
-  await app.register(teacherRoomRoutes);
-  await app.register(cloudSyncRoutes);
-  await app.register(teacherArchiveRoutes);
-  await app.register(fillerRoutes);
   await app.register(oralAuthRoutes);
   await app.register(blueprintRoutes);
   await app.register(oralSessionRoutes);

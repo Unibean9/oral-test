@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { apiOk, apiError } from '../brainstorm/contracts.js';
+import { apiOk, apiError } from '../contracts.js';
 import { ownershipGuard } from '../auth/ownershipGuard.js';
 import { RoomBusyError } from '../claude-cli/lock.js';
 import { getOralSession, resolveOralSessionOwner, setOralSessionStatus } from '../db/oralSessions.js';

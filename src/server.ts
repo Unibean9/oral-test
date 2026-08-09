@@ -1,13 +1,7 @@
 import { buildApp, HOST, PORT } from "./app.js";
-import { recoverInterruptedOperations } from "./db/sessions.js";
-import { recoverStuckSyncs } from "./db/cloudSyncQueue.js";
-import { startCloudSyncPoller, stopCloudSyncPoller } from "./cloud/outbox.js";
 import { terminateAllClaudeSessions } from "./claude-cli/spawn.js";
-import { terminateAllRenderers } from "./routes/sessionArtifacts.js";
-import * as turnRunner from "./brainstorm/turnRunner.js";
 import { db, DB_PATH } from "./db/connection.js";
 import { releaseSingleWriterLock } from "./db/singleWriterLock.js";
-import { checkVoiceDriftAtBoot } from "./tts/streamClient.js";
 
 // Route wiring lives in app.ts for app.inject() testability without binding a port;
 // everything below has a process-level side effect and stays here.
@@ -15,12 +9,7 @@ import { checkVoiceDriftAtBoot } from "./tts/streamClient.js";
 // db/connection.ts acquires the single-writer lock (ESM import order runs it first);
 // this module only releases it on shutdown.
 
-recoverInterruptedOperations();
-recoverStuckSyncs();
-startCloudSyncPoller();
-
 const app = await buildApp();
-app.addHook("onClose", async () => stopCloudSyncPoller());
 
 // Node does not kill child processes on exit; without a signal handler, Ctrl-C leaves
 // the `claude` child running and never calls app.close(), so onClose never fires.
@@ -43,11 +32,7 @@ async function shutdown(reason: string, code = 0): Promise<void> {
     process.exit(1);
   }, FORCED_EXIT_MS);
   forced.unref();
-  // Give live turn runs a bounded window to abort and settle before the harder termination
-  // steps below.
-  await turnRunner.drainAll(3_000);
   terminateAllClaudeSessions();
-  terminateAllRenderers();
   try {
     await app.close();
   } catch (err) {
@@ -87,9 +72,8 @@ app
   .listen({ port: PORT, host: HOST })
   .then(() => {
     app.log.info(
-      `brainstorm-room backend listening on ${HOST}:${PORT} (loopback only)`,
+      `oral-test backend listening on ${HOST}:${PORT} (loopback only)`,
     );
-    void checkVoiceDriftAtBoot();
   })
   .catch((err) => {
     app.log.error(err);

@@ -1,7 +1,7 @@
 import fastifyCookie from '@fastify/cookie';
 import fastifyJwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { apiError } from '../brainstorm/contracts.js';
+import { apiError } from '../contracts.js';
 
 export const AUTH_COOKIE_NAME = 'oral_test_token';
 // Short-lived per plan.md: no kiosk/capability-token mode exists in this domain, so the only way

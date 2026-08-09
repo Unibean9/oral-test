@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { apiOk, apiError, validateName } from '../brainstorm/contracts.js';
+import { apiOk, apiError, validateName } from '../contracts.js';
 import { registerTeacherWithPassword, getTeacherByCode } from '../db/teachers.js';
 import { hashPassword, verifyPassword } from '../auth/passwords.js';
 import { issueTeacherCookie, clearTeacherCookie } from '../auth/jwt.js';

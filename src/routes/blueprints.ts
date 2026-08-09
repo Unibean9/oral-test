@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { apiOk, apiError } from '../brainstorm/contracts.js';
+import { apiOk, apiError } from '../contracts.js';
 import { listBlueprints, getBlueprint, listSlotsForBlueprint } from '../db/blueprints.js';
 
 export const ORAL_TEST_PREFIX = '/api/v1/oral-test';

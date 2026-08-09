@@ -1,6 +1,6 @@
 /**
  * Indirection that lets a test substitute an exported function. Necessary because a module
- * namespace object is immutable under ESM — `ns.fn = stub` and `mock.method(ns, 'fn', stub)`
+ * namespace object is immutable under ESM - `ns.fn = stub` and `mock.method(ns, 'fn', stub)`
  * both throw under `tsx`, since the namespace's property descriptor is `configurable: false`. An
  * exported `const` bound to this wrapper is the only substitution point that works without
  * spawning a real `claude` binary. Deliberately indirection ONLY: the replacement lives in a

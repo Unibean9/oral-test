@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { apiError } from '../brainstorm/contracts.js';
+import { apiError } from '../contracts.js';
 
 /**
  * Fastify preHandler factory: verifies the teacher JWT, then resolves the target resource's
