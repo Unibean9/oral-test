@@ -1,0 +1,88 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+# Root task runner (https://taskfile.dev) for the two projects that make up this product:
+# the backend (Fastify/TS, at repo root) and the tts-sidecar (Python/FastAPI). Task's own
+# shell interpreter runs these commands identically on Windows, macOS, and Linux — no
+# separate .ps1/.sh scripts needed. Install the `task` CLI once (brew/scoop/choco/npm), then:
+#   task setup   # first-time install for both projects
+#   task dev     # run both together
+
+version: "3"
+
+vars:
+  SIDECAR_DIR: tts-sidecar
+  VENV_REL: .pyenv-tts-sidecar
+  # Task's interpreter is POSIX (mvdan/sh), not cmd.exe, so the backslashes in the Windows branch
+  # are escape characters unless the expansion sits inside shell quotes. Unquoted, `\S` and `\p`
+  # are consumed and the path collapses to `.pyenv-tts-sidecarScriptspython.exe`. Every use of
+  # {{.VENV_PYTHON}} below must therefore be its own double-quoted shell word — YAML quoting is
+  # not shell quoting.
+  VENV_PYTHON: '{{if eq OS "windows"}}{{.VENV_REL}}\Scripts\python.exe{{else}}{{.VENV_REL}}/bin/python{{end}}'
+  SYSTEM_PYTHON: '{{if eq OS "windows"}}python{{else}}python3{{end}}'
+  # Same venv as the sidecar (both need the `vieneu` package), referenced relative to the
+  # fillers task's own working directory (assets/fillers) — two levels up to the repo root,
+  # then into tts-sidecar.
+  FILLERS_PYTHON: '{{if eq OS "windows"}}..\..\{{.SIDECAR_DIR}}\{{.VENV_REL}}\Scripts\python.exe{{else}}../../{{.SIDECAR_DIR}}/{{.VENV_REL}}/bin/python{{end}}'
+
+tasks:
+  setup:
+    desc: Install backend node_modules, the deck renderer's own deps, and the tts-sidecar venv.
+    cmds:
+      - npm install
+      - task: deck-deps
+      - task: venv
+
+  deck-deps:
+    internal: true
+    # The deck renderer is a SEPARATE dependency tree on purpose — see docs/code-standards.md
+    # and the cwd note in src/routes/sessionArtifacts.ts's renderDeck(). Root `npm install`
+    # does not reach it, so a fresh clone has no puppeteer and both the renderPdf test and
+    # PDF export fail with MODULE_NOT_FOUND.
+    dir: scripts/deck
+    status:
+      - test -d node_modules/puppeteer
+    cmds:
+      - npm install
+
+  venv:
+    internal: true
+    dir: "{{.SIDECAR_DIR}}"
+    status:
+      - test -f "{{.VENV_PYTHON}}"
+    cmds:
+      - '"{{.SYSTEM_PYTHON}}" -m venv "{{.VENV_REL}}"'
+      - '"{{.VENV_PYTHON}}" -m pip install -r requirements.txt'
+
+  dev:
+    desc: Run the backend and the tts-sidecar together (Ctrl+C stops both).
+    deps: [dev:backend, dev:tts-sidecar]
+
+  dev:backend:
+    internal: true
+    cmds:
+      - npm run dev
+
+  dev:tts-sidecar:
+    internal: true
+    dir: "{{.SIDECAR_DIR}}"
+    preconditions:
+      - sh: test -f "{{.VENV_PYTHON}}"
+        msg: "tts-sidecar venv not found — run `task setup` first."
+    # Runs fillers generation to completion first, not in parallel with the sidecar's own model
+    # load below — both would otherwise load VieNeu-TTS at the same time.
+    deps: [fillers]
+    cmds:
+      - '"{{.VENV_PYTHON}}" -m uvicorn app:app --host 127.0.0.1 --port 8765'
+
+  fillers:
+    internal: true
+    dir: assets/fillers
+    # Not committed (see .gitignore) — rendered here instead. generate_fillers.py itself
+    # skips any file that already exists at the right duration, so this check only exists to
+    # skip the ~15s model load entirely on the common case where all 60 clips are present.
+    status:
+      - test $(ls filler_*.wav 2>/dev/null | wc -l) -ge 60
+    preconditions:
+      - sh: test -f "{{.FILLERS_PYTHON}}"
+        msg: "tts-sidecar venv not found — run `task setup` first."
+    cmds:
+      - '"{{.FILLERS_PYTHON}}" generate_fillers.py'

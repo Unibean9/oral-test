@@ -1,0 +1,29 @@
+{
+  "name": "brainstorm-room-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node out/server.js",
+    "typecheck": "tsc --noEmit",
+    "compile": "tsc && node scripts/copy-assets.mjs",
+    "test": "tsx src/test/e2e.ts",
+    "ingest:demo": "tsx scripts/ingest-demo-chapters.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/jwt": "^10.2.1",
+    "better-sqlite3": "^11.5.0",
+    "fastify": "^5.1.0",
+    "firebase-admin": "^13.0.2",
+    "uuid": "^11.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.9.0",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

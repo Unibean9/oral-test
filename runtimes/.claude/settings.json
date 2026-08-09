@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash",
+      "WebFetch",
+      "WebSearch",
+      "Task",
+      "SlashCommand"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|Bash|BashOutput|KillShell|WebFetch|WebSearch|Task|SlashCommand",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-room.mjs\"",
+            "timeout": 10,
+            "statusMessage": "Checking brainstorm room scoping"
+          }
+        ]
+      }
+    ]
+  }
+}

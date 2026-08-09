@@ -1,0 +1,10 @@
+{
+  "name": "brainstorm-pitch-deck-scripts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic deck.html -> deck.pdf renderer, invoked by trusted backend code only (never by Claude). See render_deck.js.",
+  "main": "render_deck.js",
+  "dependencies": {
+    "puppeteer": "^23.11.1"
+  }
+}

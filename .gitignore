@@ -1,0 +1,50 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Personal, cross-project Claude Code config - not part of this product
+.claude/
+.codex/
+.hs.json
+plans/
+docs/journals/
+
+# Python virtualenvs and bytecode caches (tts-sidecar/ + spikes/)
+**/.pyenv-tts*/
+**/__pycache__/
+*.pyc
+
+# Filler audio is rendered by `task dev`/`task setup` (assets/fillers/generate_fillers.py),
+# never committed — only the generator script and its source phrases are source-controlled.
+assets/fillers/*.wav
+
+# Node build output / install artifacts
+node_modules/
+out/
+
+# Runtime data (SQLite DB, room artifacts) - regenerated, never shipped
+data/
+room/
+*.log
+# Pre-migration DB snapshots (VACUUM INTO output), written next to the live DB file
+*.bak
+*.bak-wal
+*.bak-shm
+
+# Local environment overrides - never commit real values, only env.example
+.env
+.env.local
+.env.*.local
+
+# Spike-generated output (not the spike's own source/results docs)
+spikes/
+
+# runtimes/.claude is this product's own skill/hook config (not personal) - keep it tracked
+# despite the blanket .claude/ ignore above; runtimes/room/ (data) stays ignored via room/ above.
+!runtimes/.claude/
+!runtimes/.claude/**
+# The deck renderer's own dependency tree (scripts/deck/) is already covered by node_modules/
+# above; it lives outside runtimes/ precisely so the un-ignore rules here never reach it.
+
+# Live output from a throwaway frontend-design evaluation spike - never committed.
+.live-sell-side/

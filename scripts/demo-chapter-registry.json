@@ -1,0 +1,54 @@
+{
+  "chapters": [
+    {
+      "chapterId": "SWR-1",
+      "courseId": "SWR",
+      "chapterNo": 1,
+      "title": "The essential software requirement",
+      "sourceFile": "Software_Requirements_3rd_Edition.pdf",
+      "pdfPageStart": 36,
+      "pdfPageEnd": 57,
+      "pageOffset": 33
+    },
+    {
+      "chapterId": "SWR-2",
+      "courseId": "SWR",
+      "chapterNo": 2,
+      "title": "Requirements from the customer's perspective",
+      "sourceFile": "Software_Requirements_3rd_Edition.pdf",
+      "pdfPageStart": 58,
+      "pdfPageEnd": 75,
+      "pageOffset": 33
+    },
+    {
+      "chapterId": "SWR-3",
+      "courseId": "SWR",
+      "chapterNo": 3,
+      "title": "Good practices for requirements engineering",
+      "sourceFile": "Software_Requirements_3rd_Edition.pdf",
+      "pdfPageStart": 76,
+      "pdfPageEnd": 93,
+      "pageOffset": 33
+    },
+    {
+      "chapterId": "SWT-1",
+      "courseId": "SWT",
+      "chapterNo": 1,
+      "title": "Fundamentals of testing",
+      "sourceFile": "FOUNDATIONS_OF_SOFTWARE_TESTING_ISTQB_CE.pdf",
+      "pdfPageStart": 4,
+      "pdfPageEnd": 37,
+      "pageOffset": 3
+    },
+    {
+      "chapterId": "SWT-3",
+      "courseId": "SWT",
+      "chapterNo": 3,
+      "title": "Static techniques",
+      "sourceFile": "FOUNDATIONS_OF_SOFTWARE_TESTING_ISTQB_CE.pdf",
+      "pdfPageStart": 60,
+      "pdfPageEnd": 79,
+      "pageOffset": 3
+    }
+  ]
+}

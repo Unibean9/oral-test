@@ -1,0 +1,8 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+vieneu==3.2.3
+soundfile==0.12.1
+# app.py imports numpy directly (np.concatenate in the streaming path) — declared here rather
+# than relied on as a transitive dependency of soundfile/vieneu. Left as a range so it stays
+# compatible with whatever vieneu resolves to.
+numpy>=1.24,<3
