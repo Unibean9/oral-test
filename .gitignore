@@ -3,11 +3,12 @@
 Thumbs.db
 
 # Personal, cross-project Claude Code config - not part of this product
-.claude/
-.codex/
 .hs.json
+.mcp.json
 plans/
-docs/journals/
+docs/
+AGENTS.md
+CLAUDE.md
 
 # Python virtualenvs and bytecode caches (tts-sidecar/ + spikes/)
 **/.pyenv-tts*/
@@ -24,8 +25,8 @@ out/
 
 # Runtime data (SQLite DB, room artifacts) - regenerated, never shipped
 data/
-room/
 *.log
+
 # Pre-migration DB snapshots (VACUUM INTO output), written next to the live DB file
 *.bak
 *.bak-wal
@@ -36,15 +37,6 @@ room/
 .env.local
 .env.*.local
 
-# Spike-generated output (not the spike's own source/results docs)
-spikes/
-
-# runtimes/.claude is this product's own skill/hook config (not personal) - keep it tracked
-# despite the blanket .claude/ ignore above; runtimes/room/ (data) stays ignored via room/ above.
+# runtimes/.claude is this product's own skill/hook config
 !runtimes/.claude/
 !runtimes/.claude/**
-# The deck renderer's own dependency tree (scripts/deck/) is already covered by node_modules/
-# above; it lives outside runtimes/ precisely so the un-ignore rules here never reach it.
-
-# Live output from a throwaway frontend-design evaluation spike - never committed.
-.live-sell-side/

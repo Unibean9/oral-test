@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""TTS sidecar. Loads VieNeu-TTS-v3-Turbo ONCE at startup (RTF 0.672 median, code-switch
-quality 4/5 in benchmarking). Localhost-only.
+"""TTS sidecar. Loads VieNeu-TTS-v3-Turbo ONCE at startup. Localhost-only.
 
 Run: uvicorn app:app --host 127.0.0.1 --port 8765
 """
