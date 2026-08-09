@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { v4 as uuidv4 } from 'uuid';
@@ -15,14 +16,32 @@ export const PROJECT_ROOT = process.env.BRAINSTORM_PROJECT_ROOT
  * `.claude/skills/oral-examiner`, `.claude/skills/oral-assessment-reviewer`,
  * `.claude/hooks/guard-room.mjs`, `.claude/settings.json`.
  *
- * Known accepted gap: because `runtimes/` is nested inside this repo, spawned sessions still
- * inherit the user's personal `.claude/skills/` kit (Claude Code walks up from cwd collecting
- * every `.claude/skills/` it passes until a git repo boundary). Revisit before this code runs
- * somewhere that personal kit isn't going away.
+ * Known accepted gap: because `runtimes/` is nested inside this repo, project-scope skill
+ * discovery walking up from `cwd` can still surface this repo's own `.claude/skills/` (the
+ * operator's engineering-workflow kit, not an oral-assessment skill) before it hits a repo
+ * boundary. `CLAUDE_CONFIG_DIR`/`HOME` isolation (see `SERVICE_HOME`) only blocks *user*-scope
+ * discovery, not this. Not exploitable today because neither role is granted any tool that could
+ * act on an unexpected skill being visible, but revisit if that ever changes.
  */
 export const SYSTEM_ROOT = process.env.BRAINSTORM_SYSTEM_ROOT
   ? path.resolve(process.env.BRAINSTORM_SYSTEM_ROOT)
   : path.resolve(PROJECT_ROOT, 'runtimes');
+
+/**
+ * Isolated home for spawned `claude` children — opt-in only, via `ORAL_RUNTIME_HOME`. When unset
+ * (the default), children inherit this process's own `HOME`/`USERPROFILE`/`CLAUDE_CONFIG_DIR` and
+ * therefore whatever `claude login` state already exists on this machine: no separate credentials
+ * file to provision, no `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` to set. Set `ORAL_RUNTIME_HOME`
+ * only for a real multi-tenant/shared deployment where the operator's personal `~/.claude` (skills,
+ * settings, session history, MCP config) must not be reachable from a spawned examiner/reviewer.
+ */
+export const SERVICE_HOME = process.env.ORAL_RUNTIME_HOME
+  ? path.resolve(process.env.ORAL_RUNTIME_HOME)
+  : null;
+
+function ensureServiceHome(): void {
+  if (SERVICE_HOME) fs.mkdirSync(SERVICE_HOME, { recursive: true });
+}
 
 /**
  * Every live `claude` child, so shutdown can reap them.
@@ -34,11 +53,13 @@ export const SYSTEM_ROOT = process.env.BRAINSTORM_SYSTEM_ROOT
 const liveChildren = new Set<ChildProcess>();
 
 /**
- * `stdio` matters: without it the child gets a pipe on stdin that is never written to and never
- * closed, and `claude -p` can block waiting for EOF on non-TTY stdin. 'ignore' gives it an
- * immediate EOF.
+ * stdin is piped, not ignored: the prompt is written there and the stream is closed immediately
+ * after (see runClaude), never left open. A prompt passed as a trailing argv element instead hits
+ * `spawn ENAMETOOLONG` on Windows the moment a chapter's full source-chunk text pushes the command
+ * line past the OS's argv length limit — this is not a hypothetical, it broke the very first live
+ * examiner call this runtime made against a real ingested chapter.
  */
-const CHILD_STDIO = ['ignore', 'pipe', 'pipe'] as const;
+const CHILD_STDIO = ['pipe', 'pipe', 'pipe'] as const;
 const KILL_ESCALATION_MS = 2_000;
 
 /**
@@ -64,17 +85,35 @@ function killEscalating(child: ChildProcess, keepAlive = false): void {
 export const CLAUDE_MODEL = process.env.BRAINSTORM_CLAUDE_MODEL ?? 'claude-sonnet-5';
 
 /**
- * The one place `claude` argv is assembled, so `--model` cannot be forgotten at a call site.
+ * Every oral-assessment role this runtime spawns. Neither needs any tool at all: both skills
+ * receive their entire material (source chunks, prior questions, the student's relayed answer) in
+ * the prompt itself, and their only output is the CLI's own stdout envelope — granting `Read`
+ * would let a successful prompt injection read `SERVICE_HOME`'s credentials or another session's
+ * `--resume` history back out. `acceptEdits` (the previous default) auto-approved the whole edit
+ * family regardless of role; `default` mode requires explicit approval for anything not in
+ * `--allowedTools`, and a headless `-p` invocation has no TTY to approve it interactively, so an
+ * unlisted tool is denied outright.
+ */
+export type ClaudeRole = 'examiner' | 'reviewer';
+const ROLE_ALLOWED_TOOLS: Record<ClaudeRole, string> = { examiner: '', reviewer: '' };
+
+/**
+ * The one place `claude` argv is assembled, so `--model` cannot be forgotten at a call site. The
+ * prompt itself is NOT part of argv — `claude -p` (no positional prompt) reads it from stdin,
+ * which is what `runClaude` writes it to. A source chunk's full chapter text easily exceeds the
+ * OS argv length limit (Windows: `spawn ENAMETOOLONG`) if passed as a trailing argument instead.
  */
 export function buildClaudeArgs(spec: {
   session?: { mode: 'new' | 'resume'; id: string };
   allowedTools?: string;
-  prompt: string;
+  role?: ClaudeRole;
 }): string[] {
   const args = ['-p'];
   if (spec.session) args.push(spec.session.mode === 'resume' ? '--resume' : '--session-id', spec.session.id);
   args.push('--model', CLAUDE_MODEL, '--output-format', 'json');
-  args.push('--permission-mode', 'acceptEdits', `--allowedTools=${spec.allowedTools ?? 'Write,Read'}`, spec.prompt);
+  const allowedTools = spec.allowedTools ?? ROLE_ALLOWED_TOOLS[spec.role ?? 'examiner'];
+  args.push('--permission-mode', 'default');
+  if (allowedTools) args.push(`--allowedTools=${allowedTools}`);
   return args;
 }
 
@@ -90,6 +129,44 @@ export function _setSpawnForTests(fn: ((args: string[], contextId: string) => Ch
   spawnOverrideForTests = fn;
 }
 
+/**
+ * Allowlisted child environment. Never spreads `process.env`: this process also holds
+ * `ORAL_TEST_JWT_SECRET`, `DB_PATH`, `TTS_SIDECAR_URL`, none of which an oral-assessment agent has
+ * any legitimate reason to read. Only the keys a `claude` child actually needs to run pass
+ * through. Auth resolution: with `SERVICE_HOME` unset (the default), `HOME`/`USERPROFILE`/
+ * `CLAUDE_CONFIG_DIR` are simply not overridden, so the child falls back to the real `claude`
+ * binary's own default config resolution — i.e. whatever `claude login` already set up on this
+ * machine. `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` remain supported as an explicit override
+ * either way.
+ */
+function buildChildEnv(contextId: string): NodeJS.ProcessEnv {
+  ensureServiceHome();
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH,
+    ROOM_ID: contextId,
+  };
+  if (SERVICE_HOME) {
+    env.CLAUDE_CONFIG_DIR = SERVICE_HOME;
+    env.HOME = SERVICE_HOME;
+    env.USERPROFILE = SERVICE_HOME;
+  } else {
+    env.HOME = process.env.HOME;
+    env.USERPROFILE = process.env.USERPROFILE;
+  }
+  if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) env.CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (process.platform === 'win32') {
+    env.SystemRoot = process.env.SystemRoot;
+    env.ComSpec = process.env.ComSpec;
+    env.PATHEXT = process.env.PATHEXT;
+    env.TEMP = process.env.TEMP;
+    env.TMP = process.env.TMP;
+  } else {
+    env.TMPDIR = process.env.TMPDIR;
+  }
+  return env;
+}
+
 function spawnClaude(args: string[], contextId: string): ChildProcess {
   if (spawnOverrideForTests) {
     const stub = spawnOverrideForTests(args, contextId);
@@ -99,7 +176,7 @@ function spawnClaude(args: string[], contextId: string): ChildProcess {
   }
   const child = spawn('claude', args, {
     cwd: SYSTEM_ROOT,
-    env: { ...process.env, ROOM_ID: contextId },
+    env: buildChildEnv(contextId),
     windowsHide: true,
     stdio: [...CHILD_STDIO],
   });
@@ -166,9 +243,10 @@ export function wrapUntrusted(text: string, trailer: string): string {
 const MAX_STDOUT_BYTES = 384 * 1024;
 const MAX_STDERR_BYTES = 16 * 1024;
 
-function runClaude(args: string[], contextId: string, timeoutMs: number = LIMITS.claudeTimeoutMs): Promise<{ stdout: string; stderr: string; code: number | null }> {
+function runClaude(args: string[], prompt: string, contextId: string, timeoutMs: number = LIMITS.claudeTimeoutMs): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve, reject) => {
     const child = spawnClaude(args, contextId);
+    child.stdin?.end(prompt, 'utf8');
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -228,14 +306,101 @@ function parseEnvelope(stdout: string): string {
 async function runRawFreshSessionImpl(
   contextId: string,
   prompt: string,
-  allowedTools: string = 'Read',
+  allowedTools?: string,
   timeoutMs: number = LIMITS.claudeArtifactTimeoutMs,
+  role: ClaudeRole = 'reviewer',
 ): Promise<string> {
   const sessionId = uuidv4();
-  const args = buildClaudeArgs({ session: { mode: 'new', id: sessionId }, allowedTools, prompt });
-  const { stdout, stderr, code } = await runClaude(args, contextId, timeoutMs);
+  const args = buildClaudeArgs({ session: { mode: 'new', id: sessionId }, allowedTools, role });
+  const { stdout, stderr, code } = await runClaude(args, prompt, contextId, timeoutMs);
   if (code !== 0) throw new Error(`claude raw fresh-session invocation failed (exit ${code}): ${stderr.slice(0, 2000)}`);
   return parseEnvelope(stdout);
 }
 
 export const runRawFreshSession = seam(runRawFreshSessionImpl);
+
+/**
+ * The only examiner entry point. Unlike `runRawFreshSession`, this binds one Claude CLI session
+ * to one oral session for its whole lifetime: the first call creates a new session id, every
+ * later call for the same `oralSessionId` resumes it with `--resume`. The caller (questionEngine)
+ * is responsible for persisting the returned `claudeSessionId` against the oral session row and
+ * passing it back in on the next call — this function holds no state of its own.
+ */
+async function runExaminerTransitionImpl(
+  oralSessionId: string,
+  claudeSessionId: string | null,
+  prompt: string,
+  timeoutMs: number = LIMITS.claudeTimeoutMs,
+): Promise<{ text: string; claudeSessionId: string }> {
+  const sessionId = claudeSessionId ?? uuidv4();
+  const args = buildClaudeArgs({
+    session: { mode: claudeSessionId ? 'resume' : 'new', id: sessionId },
+    role: 'examiner',
+  });
+  const { stdout, stderr, code } = await runClaude(args, prompt, oralSessionId, timeoutMs);
+  if (code !== 0) throw new Error(`claude examiner invocation failed (exit ${code}): ${stderr.slice(0, 2000)}`);
+  return { text: parseEnvelope(stdout), claudeSessionId: sessionId };
+}
+
+export const runExaminerTransition = seam(runExaminerTransitionImpl);
+
+/**
+ * Resolves where the `claude` CLI itself will look for credentials, mirroring `buildChildEnv`'s
+ * env selection: `CLAUDE_CONFIG_DIR` (or `SERVICE_HOME`) if set, else the CLI's own default of
+ * `<home>/.claude` under whichever `HOME`/`USERPROFILE` the child would inherit.
+ */
+function resolveClaudeConfigDir(): string | null {
+  const configDir = SERVICE_HOME ?? process.env.CLAUDE_CONFIG_DIR;
+  if (configDir) return path.resolve(configDir);
+  const home = process.platform === 'win32' ? process.env.USERPROFILE : process.env.HOME;
+  return home ? path.join(home, '.claude') : null;
+}
+
+/**
+ * Free, boot-time-safe checks only: does `claude` resolve on PATH, and does *something* that could
+ * plausibly authenticate it exist (an explicit token env var, or a credentials file under the
+ * resolved config dir). Deliberately does not make a real API call — that has a real dollar cost
+ * per invocation (see CLAUDE_MODEL's doc comment) and this runs on every server start, including
+ * every `tsx watch` restart during dev. For an actual round-trip test, run
+ * `npm run check:claude-cli` once instead.
+ */
+export function checkClaudeCliAtBoot(): void {
+  const found = spawnSync('claude', ['--version'], { stdio: 'ignore', shell: process.platform === 'win32' });
+  if (found.error || found.status !== 0) {
+    console.warn(
+      '[claude-cli] `claude` was not found on PATH — install/authenticate the Claude Code CLI ' +
+      '(`claude login`) before starting an oral session. Run `npm run check:claude-cli` to verify.',
+    );
+    return;
+  }
+  if (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN) return;
+  const configDir = resolveClaudeConfigDir();
+  const credentialsPath = configDir ? path.join(configDir, '.credentials.json') : null;
+  if (!credentialsPath || !fs.existsSync(credentialsPath)) {
+    console.warn(
+      `[claude-cli] no ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN set and no credentials file found ` +
+      `at ${credentialsPath ?? '(unresolvable home directory)'} — run \`claude login\` on this machine ` +
+      'first, or set one of those env vars. Run `npm run check:claude-cli` to verify.',
+    );
+  }
+}
+
+/**
+ * Real round-trip test: spawns an actual `claude` invocation with a trivial prompt. Has a real
+ * dollar cost (pinned to CLAUDE_MODEL, same as every other call this runtime makes) — intended to
+ * be run explicitly via `npm run check:claude-cli`, never automatically at server boot.
+ */
+export async function checkClaudeCliConnectivity(): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const result = await runRawFreshSessionImpl(
+      'claude-cli-connectivity-check',
+      'Reply with exactly one word: ok',
+      undefined,
+      LIMITS.claudeTimeoutMs,
+      'reviewer',
+    );
+    return result.trim().length > 0 ? { ok: true } : { ok: false, error: 'empty response' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}

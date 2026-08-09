@@ -1,5 +1,5 @@
 import { buildApp, HOST, PORT } from "./app.js";
-import { terminateAllClaudeSessions } from "./claude-cli/spawn.js";
+import { checkClaudeCliAtBoot, terminateAllClaudeSessions } from "./claude-cli/spawn.js";
 import { db, DB_PATH } from "./db/connection.js";
 import { releaseSingleWriterLock } from "./db/singleWriterLock.js";
 import { abortAllAndDrain } from "./oral-session/questionSpeechJobs.js";
@@ -15,6 +15,7 @@ const app = await buildApp();
 
 // Never throws, never blocks startup — see checkVoiceDriftAtBoot's own doc comment.
 void checkVoiceDriftAtBoot().catch(() => {});
+checkClaudeCliAtBoot();
 
 // Node does not kill child processes on exit; without a signal handler, Ctrl-C leaves
 // the `claude` child running and never calls app.close(), so onClose never fires.

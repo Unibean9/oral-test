@@ -4,31 +4,40 @@ import { getSourceChunk } from '../db/sourceChunks.js';
 export const EXAMINER_STATE_OPEN = '<oral-examiner-state>';
 export const EXAMINER_STATE_CLOSE = '</oral-examiner-state>';
 
-const PHASES = new Set(['asking', 'done']);
-const NEXT_ACTIONS = new Set(['awaiting_answer', 'none']);
-const STOP_REASONS = new Set(['all_slots_answered', 'ungroundable_slot', 'teacher_ended']);
+export type ExaminerAction = 'advance' | 'probe' | 'clarify' | 'challenge' | 'redirect' | 'close';
+export type ExaminerDisposition = 'continue' | 'complete';
+export type ExaminerCompletionReason = 'coverage_verified' | 'ended_early';
 
-export interface ExaminerState {
-  phase: 'asking' | 'done';
+const ACTIONS = new Set<ExaminerAction>(['advance', 'probe', 'clarify', 'challenge', 'redirect', 'close']);
+const DISPOSITIONS = new Set<ExaminerDisposition>(['continue', 'complete']);
+const COMPLETION_REASONS = new Set<ExaminerCompletionReason>(['coverage_verified', 'ended_early']);
+
+/**
+ * One examiner turn's proposal. `bloom_level` is deliberately not part of this contract: the
+ * agent targets a `slot_id` the backend already assigned a Bloom level to, and the backend always
+ * uses that DB value rather than trusting an echoed one — one less field the agent could get
+ * subtly wrong. `completion_reason` is likewise advisory only: questionEngine.ts always recomputes
+ * it from live coverage state before persisting, never from what the agent claims.
+ */
+export interface ExaminerTransition {
+  action: ExaminerAction;
   slot_id: string;
   question_text: string;
-  bloom_level: string;
   source_chunk_ids: string[];
-  next_action: 'awaiting_answer' | 'none';
-  stop_reason: string | null;
+  disposition: ExaminerDisposition;
+  completion_reason: ExaminerCompletionReason | null;
 }
 
 export class ExaminerStateParseError extends Error {
-  constructor(reason: string) { super(`invalid oral-examiner state: ${reason}`); this.name = 'ExaminerStateParseError'; }
+  constructor(reason: string) { super(`invalid oral-examiner transition: ${reason}`); this.name = 'ExaminerStateParseError'; }
 }
 
 /**
  * Syntax-level parse only: extracts and JSON-parses the delimiter block, checks every field's
- * TYPE and enum membership. Does NOT check the value against the DB (slot exists, chunk belongs
- * to the slot's chapter, etc.) — that is validateAgainstSession's job below, since it needs a
- * session's blueprint context this function doesn't have.
+ * TYPE and enum membership. Does NOT check a value against the DB (slot exists, chunk belongs to
+ * the slot's chapter, etc.) — that is validateExaminerTransitionAgainstSlot's job below.
  */
-export function parseExaminerStateBlock(rawText: string): ExaminerState {
+export function parseExaminerStateBlock(rawText: string): ExaminerTransition {
   const start = rawText.indexOf(EXAMINER_STATE_OPEN);
   if (start < 0) throw new ExaminerStateParseError('no state block found');
   if (rawText.indexOf(EXAMINER_STATE_OPEN, start + EXAMINER_STATE_OPEN.length) >= 0) {
@@ -46,50 +55,59 @@ export function parseExaminerStateBlock(rawText: string): ExaminerState {
   }
   const record = parsed as Record<string, unknown>;
   if (typeof record !== 'object' || record === null) throw new ExaminerStateParseError('state block is not a JSON object');
-  if (typeof record.phase !== 'string' || !PHASES.has(record.phase)) throw new ExaminerStateParseError('phase must be "asking" or "done"');
+  if (typeof record.action !== 'string' || !ACTIONS.has(record.action as ExaminerAction)) {
+    throw new ExaminerStateParseError('action must be one of advance, probe, clarify, challenge, redirect, close');
+  }
   if (typeof record.slot_id !== 'string' || !record.slot_id) throw new ExaminerStateParseError('slot_id is required');
-  if (typeof record.next_action !== 'string' || !NEXT_ACTIONS.has(record.next_action)) throw new ExaminerStateParseError('next_action must be "awaiting_answer" or "none"');
-  if (record.stop_reason !== null && (typeof record.stop_reason !== 'string' || !STOP_REASONS.has(record.stop_reason))) {
-    throw new ExaminerStateParseError('stop_reason must be null or a known reason');
+  if (typeof record.disposition !== 'string' || !DISPOSITIONS.has(record.disposition as ExaminerDisposition)) {
+    throw new ExaminerStateParseError('disposition must be "continue" or "complete"');
   }
-  if (record.phase === 'asking') {
-    if (typeof record.question_text !== 'string' || !record.question_text.trim()) throw new ExaminerStateParseError('question_text is required when phase is "asking"');
-    if (typeof record.bloom_level !== 'string' || !record.bloom_level) throw new ExaminerStateParseError('bloom_level is required when phase is "asking"');
-    if (!Array.isArray(record.source_chunk_ids) || record.source_chunk_ids.length === 0 || !record.source_chunk_ids.every((id) => typeof id === 'string')) {
-      throw new ExaminerStateParseError('source_chunk_ids must be a non-empty array of strings when phase is "asking"');
+  const action = record.action as ExaminerAction;
+  const disposition = record.disposition as ExaminerDisposition;
+
+  if (action === 'close') {
+    if (disposition !== 'complete') throw new ExaminerStateParseError('disposition must be "complete" when action is "close"');
+    if (record.completion_reason !== null && (typeof record.completion_reason !== 'string' || !COMPLETION_REASONS.has(record.completion_reason as ExaminerCompletionReason))) {
+      throw new ExaminerStateParseError('completion_reason must be null or a known reason');
     }
-    if (record.stop_reason !== null) throw new ExaminerStateParseError('stop_reason must be null while phase is "asking"');
   } else {
-    if (record.stop_reason === null) throw new ExaminerStateParseError('stop_reason is required when phase is "done"');
-    if (record.next_action !== 'none') throw new ExaminerStateParseError('next_action must be "none" when phase is "done"');
+    if (disposition !== 'continue') throw new ExaminerStateParseError('disposition must be "continue" unless action is "close"');
+    if (record.completion_reason !== undefined && record.completion_reason !== null) {
+      throw new ExaminerStateParseError('completion_reason must be null unless action is "close"');
+    }
+    if (typeof record.question_text !== 'string' || !record.question_text.trim()) {
+      throw new ExaminerStateParseError('question_text is required unless action is "close"');
+    }
+    if (!Array.isArray(record.source_chunk_ids) || record.source_chunk_ids.length === 0 || !record.source_chunk_ids.every((id) => typeof id === 'string')) {
+      throw new ExaminerStateParseError('source_chunk_ids must be a non-empty array of strings unless action is "close"');
+    }
   }
+
   return {
-    phase: record.phase as 'asking' | 'done',
+    action,
     slot_id: record.slot_id,
     question_text: typeof record.question_text === 'string' ? record.question_text.trim() : '',
-    bloom_level: typeof record.bloom_level === 'string' ? record.bloom_level : '',
     source_chunk_ids: Array.isArray(record.source_chunk_ids) ? (record.source_chunk_ids as string[]) : [],
-    next_action: record.next_action as 'awaiting_answer' | 'none',
-    stop_reason: (record.stop_reason as string | null) ?? null,
+    disposition,
+    completion_reason: (record.completion_reason as ExaminerCompletionReason | null | undefined) ?? null,
   };
 }
 
 /**
- * DB-backed validation for an "asking" state: the slot must belong to the session's blueprint,
- * the bloom_level must match the slot's assigned level, and every cited chunk_id must belong to
- * that slot's chapter. Rejects (never persists) a citation that reaches outside the assigned
- * chunk set — see Phase 4's success criteria.
+ * DB-backed validation for a non-close transition: the slot must exist, and every cited chunk_id
+ * must belong to that slot's chapter. Rejects (never persists) a citation that reaches outside the
+ * assigned chunk set. Returns the slot's own chapter/CLO/bloom_level — the backend's authoritative
+ * values, never the agent's.
  */
-export function validateExaminerQuestionAgainstSlot(state: ExaminerState): { chapterId: string; cloId: string } {
-  if (state.phase !== 'asking') throw new ExaminerStateParseError('validateExaminerQuestionAgainstSlot called on a non-asking state');
+export function validateExaminerTransitionAgainstSlot(state: ExaminerTransition): { chapterId: string; cloId: string; bloomLevel: string } {
+  if (state.action === 'close') throw new ExaminerStateParseError('validateExaminerTransitionAgainstSlot called on a close transition');
   const slot = getBlueprintSlot(state.slot_id);
   if (!slot) throw new ExaminerStateParseError(`slot_id ${state.slot_id} does not exist`);
-  if (slot.bloom_level !== state.bloom_level) throw new ExaminerStateParseError(`bloom_level ${state.bloom_level} does not match slot ${state.slot_id}'s assigned level ${slot.bloom_level}`);
   for (const chunkId of state.source_chunk_ids) {
     const chunk = getSourceChunk(chunkId);
     if (!chunk || chunk.chapter_id !== slot.chapter_id) {
       throw new ExaminerStateParseError(`source_chunk_id ${chunkId} is not part of slot ${state.slot_id}'s assigned chapter`);
     }
   }
-  return { chapterId: slot.chapter_id, cloId: slot.clo_id };
+  return { chapterId: slot.chapter_id, cloId: slot.clo_id, bloomLevel: slot.bloom_level };
 }

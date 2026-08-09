@@ -32,8 +32,9 @@ runMigrations(db);
 const { registerTeacherWithPassword } = await import('../src/db/teachers.js');
 const { upsertSourceChunk } = await import('../src/db/sourceChunks.js');
 const { createOralSession, getOralSession } = await import('../src/db/oralSessions.js');
-const { createOralTurn, listTurnsForQuestion, listQuestionsForSession } = await import('../src/db/questions.js');
+const { listTurnsForQuestion, listQuestionsForSession } = await import('../src/db/questions.js');
 const { askNextQuestion } = await import('../src/oral-session/questionEngine.js');
+const { submitOralTurn } = await import('../src/oral-session/submitTurn.js');
 const { draftReview } = await import('../src/review/draftReview.js');
 const { approveReport, getReportForSession } = await import('../src/db/reports.js');
 const { listRubricItemsForSession } = await import('../src/db/rubric.js');
@@ -108,27 +109,41 @@ async function main() {
   ].join('\n'));
 
   const session = createOralSession({ blueprintId: 'bp_swr_demo_v1', teacherId: teacher.teacher_id, studentCode: 'LIVE-SMOKE-01' });
-  log('Session started', `session_id=${session.session_id} blueprint=bp_swr_demo_v1 (full run: all 15 blueprint questions, live CLI for every one)`);
+  log('Session started', `session_id=${session.session_id} blueprint=bp_swr_demo_v1 (full run: all 15 blueprint questions, one resumed CLI session, live CLI for every turn)`);
 
+  // Drives the real conversation the same way the HTTP layer does: one persisted CLI session,
+  // resumed via submitOralTurn on every turn after the first — never re-calling askNextQuestion
+  // directly, since that only ever proposes the session-start turn shape.
   const answerCursor: Record<string, number> = {};
+  const turnLatenciesMs: number[] = [];
   let questionNo = 0;
-  for (;;) {
+  const t0 = Date.now();
+  let question = await askNextQuestion(session.session_id);
+  turnLatenciesMs.push(Date.now() - t0);
+  while (question) {
     questionNo += 1;
-    const t0 = Date.now();
-    const question = await askNextQuestion(session.session_id);
-    const elapsedMs = Date.now() - t0;
-    if (!question) { log('Blueprint exhausted', `askNextQuestion returned null after ${questionNo - 1} question(s) — every slot's question_count is now met.`); break; }
-    log(`Question ${questionNo} (${elapsedMs}ms)`, [
-      `slot_id=${question.slot_id} chapter_id=${question.chapter_id} clo_id=${question.clo_id} bloom_level=${question.bloom_level}`,
+    log(`Question ${questionNo} (${turnLatenciesMs[turnLatenciesMs.length - 1]}ms)`, [
+      `slot_id=${question.slot_id} chapter_id=${question.chapter_id} clo_id=${question.clo_id} bloom_level=${question.bloom_level} action=${question.action}`,
       `question_text: ${question.question_text}`,
       `source_chunk_ids: ${question.source_chunk_ids}`,
     ].join('\n'));
     const pool = ANSWER_POOLS[question.chapter_id] ?? ['(no answer pool for this chapter)'];
     const idx = (answerCursor[question.chapter_id] = (answerCursor[question.chapter_id] ?? 0) + 1) - 1;
     const answerText = pool[idx % pool.length];
-    const turn = createOralTurn({ questionId: question.question_id, inputMode: 'typed', text: answerText });
+
+    const tTurn = Date.now();
+    const { turn, nextQuestion } = await submitOralTurn({ sessionId: session.session_id, questionId: question.question_id, inputMode: 'typed', text: answerText });
+    turnLatenciesMs.push(Date.now() - tTurn);
     log(`Answer ${questionNo} (recorded by this script, not AI-generated)`, `turn_id=${turn.turn_id}\ntext: ${answerText}`);
+    question = nextQuestion;
   }
+  const avgMs = Math.round(turnLatenciesMs.reduce((a, b) => a + b, 0) / turnLatenciesMs.length);
+  const maxMs = Math.max(...turnLatenciesMs);
+  log('Blueprint exhausted', [
+    `${questionNo} question(s) asked across ${turnLatenciesMs.length} live examiner CLI call(s).`,
+    `latency: avg=${avgMs}ms max=${maxMs}ms all=[${turnLatenciesMs.join(', ')}]`,
+    `completion_reason=${getOralSession(session.session_id)?.completion_reason} claude_session_id=${getOralSession(session.session_id)?.claude_session_id}`,
+  ].join('\n'));
 
   const t1 = Date.now();
   const { report, items } = await draftReview(session.session_id);

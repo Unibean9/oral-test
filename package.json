@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "compile": "tsc",
     "test": "tsx src/test/e2e.ts",
-    "ingest:demo": "tsx scripts/ingest-demo-chapters.ts"
+    "ingest:demo": "tsx scripts/ingest-demo-chapters.ts",
+    "check:claude-cli": "tsx scripts/check-claude-cli.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

@@ -14,8 +14,9 @@ import { apiError, apiOk } from "./contracts.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const PORT = Number(process.env.PORT ?? 3001);
-// Internal tool, no auth layer — must never be reachable beyond localhost.
-export const HOST = "127.0.0.1";
+// Loopback remains the safe local default. Docker sets this explicitly so containers can reach
+// the API through their private network while the Compose port stays loopback-bound on the VPS.
+export const HOST = process.env.ORAL_TEST_HOST ?? "127.0.0.1";
 
 function resolveAllowedOrigins(): string[] {
   const origins = (
@@ -38,6 +39,21 @@ function resolveAllowedOrigins(): string[] {
   return origins;
 }
 
+function resolveAllowedHosts(): Set<string> {
+  const defaults = [
+    `127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`,
+    "127.0.0.1", "localhost", "[::1]",
+  ];
+  const raw = process.env.ORAL_TEST_ALLOWED_HOSTS;
+  const hosts = (raw ? raw.split(",") : defaults)
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+  if (hosts.length === 0 || hosts.some((host) => /\s/.test(host))) {
+    throw new Error("ORAL_TEST_ALLOWED_HOSTS must contain one or more comma-separated Host values");
+  }
+  return new Set(hosts);
+}
+
 /**
  * Builds the fully-wired Fastify instance without binding a port, so the HTTP surface —
  * the Origin/Host guard, the error envelope, the 404 shape, route validation — can be
@@ -52,12 +68,9 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
   // Origin header the configured allowlist has no reason to mention. Accept it implicitly.
   const selfOrigins = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]);
   const isAllowedOrigin = (origin: string) => allowedOrigins.includes(origin) || selfOrigins.has(origin);
-  // Host values that legitimately reach a loopback-bound listener. Anything else means the
-  // request arrived via a hostname that merely resolves to 127.0.0.1 — DNS rebinding.
-  const allowedHosts = new Set([
-    `127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`,
-    "127.0.0.1", "localhost", "[::1]",
-  ]);
+  // Defaults only admit loopback hosts. A deployment behind a trusted reverse proxy must opt in
+  // to its public Host value rather than accepting every host header by virtue of binding 0.0.0.0.
+  const allowedHosts = resolveAllowedHosts();
 
   app.addHook("onRequest", async (request, reply) => {
     // With no auth layer, Origin/Host checks are the only thing standing between this API and a

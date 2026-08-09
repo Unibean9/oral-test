@@ -1,0 +1,49 @@
+services:
+  seed:
+    image: ${ORAL_TEST_SEED_IMAGE:-oral-test-seed:local}
+    build:
+      context: .
+      target: seed
+    environment:
+      DB_PATH: /data/rooms.db
+    volumes:
+      - oral-test-data:/data
+    restart: "no"
+
+  tts:
+    image: ${ORAL_TEST_TTS_IMAGE:-oral-test-tts:local}
+    build:
+      context: ./tts-sidecar
+    volumes:
+      - tts-model-cache:/models
+    restart: unless-stopped
+
+  api:
+    image: ${ORAL_TEST_IMAGE:-oral-test-api:local}
+    build:
+      context: .
+      target: api
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DB_PATH: /data/rooms.db
+      ORAL_RUNTIME_HOME: /runtime/claude
+      ORAL_TEST_HOST: 0.0.0.0
+      TTS_SIDECAR_URL: http://tts:8765
+    ports:
+      - "127.0.0.1:${ORAL_TEST_PORT:-3001}:3001"
+    volumes:
+      - oral-test-data:/data
+      - oral-runtime:/runtime
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      tts:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  oral-test-data:
+  oral-runtime:
+  tts-model-cache:

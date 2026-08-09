@@ -1,0 +1,127 @@
+name: Publish container images
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOCKER_IMAGE_PREFIX: oral-test
+
+jobs:
+  docker-validate:
+    name: Docker / Validate Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: api
+          push: false
+          tags: ${{ env.DOCKER_IMAGE_PREFIX }}-api:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Build seed image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: seed
+          push: false
+          tags: ${{ env.DOCKER_IMAGE_PREFIX }}-seed:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Build tts image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./tts-sidecar
+          push: false
+          tags: ${{ env.DOCKER_IMAGE_PREFIX }}-tts:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+  deploy:
+    name: Deploy
+    needs: [docker-validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment: production
+    env:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate deployment secrets
+        run: |
+          test -n "$DOCKER_USERNAME" || { echo "DOCKER_USERNAME secret is required"; exit 1; }
+          test -n "$DOCKER_PASSWORD" || { echo "DOCKER_PASSWORD secret is required"; exit 1; }
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
+
+      - name: Build and push api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: api
+          pull: true
+          push: true
+          tags: |
+            ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_PREFIX }}-api:latest
+            ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_PREFIX }}-api:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Build and push seed image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: seed
+          pull: true
+          push: true
+          tags: |
+            ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_PREFIX }}-seed:latest
+            ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_PREFIX }}-seed:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Build and push tts image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./tts-sidecar
+          pull: true
+          push: true
+          tags: |
+            ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_PREFIX }}-tts:latest
+            ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_PREFIX }}-tts:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true

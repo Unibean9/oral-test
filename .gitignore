@@ -23,8 +23,6 @@ out/
 data/
 *.log
 
-# Source textbook PDFs for demo chapter ingestion - copyrighted, supplied locally, never shipped
-assets/*.pdf
 
 # Pre-migration DB snapshots (VACUUM INTO output), written next to the live DB file
 *.bak

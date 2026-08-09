@@ -78,24 +78,25 @@ await check('withRoomLock allows different rooms concurrently', async () => {
   await Promise.all([withRoomLock(roomA, async () => {}), withRoomLock(roomB, async () => {})]);
 });
 
-await check('every claude invocation pins an explicit --model', () => {
+await check('every claude invocation pins an explicit --model, and the prompt never enters argv', () => {
   // Without --model a spawned session inherits the operator's interactive default. Measured on a
   // box defaulting to claude-opus-5[1m]: $0.357 for one room-creation greeting. Cost must be a
   // property of this code, not of the machine, so no call shape may omit the flag.
   const shapes = [
-    claudeSpawn.buildClaudeArgs({ prompt: 'p' }),
-    claudeSpawn.buildClaudeArgs({ session: { mode: 'new', id: 'sid' }, prompt: 'p' }),
-    claudeSpawn.buildClaudeArgs({ session: { mode: 'resume', id: 'rid' }, prompt: 'p' }),
-    claudeSpawn.buildClaudeArgs({ session: { mode: 'new', id: 'sid' }, allowedTools: 'Read', prompt: 'p' }),
+    claudeSpawn.buildClaudeArgs({}),
+    claudeSpawn.buildClaudeArgs({ session: { mode: 'new', id: 'sid' } }),
+    claudeSpawn.buildClaudeArgs({ session: { mode: 'resume', id: 'rid' } }),
+    claudeSpawn.buildClaudeArgs({ session: { mode: 'new', id: 'sid' }, allowedTools: 'Read' }),
   ];
   for (const args of shapes) {
     const at = args.indexOf('--model');
     assert.notEqual(at, -1, `--model missing from ${args.join(' ')}`);
     assert.equal(args[at + 1], claudeSpawn.CLAUDE_MODEL);
   }
-  // The prompt stays last, after every flag — a prompt parsed as a flag value would be a silent
-  // behavioural change rather than an error.
-  for (const args of shapes) assert.equal(args[args.length - 1], 'p');
+  // The prompt is delivered over stdin (runClaude), never as an argv element — a chapter's full
+  // source-chunk text pushed into argv is exactly what caused a real `spawn ENAMETOOLONG` on
+  // Windows the first time this runtime called a real, fully-ingested chapter.
+  for (const args of shapes) assert.equal(args.includes('p'), false, 'no call shape may carry a bare prompt-shaped argv element');
 });
 
 await check('F14: the shutdown path reaps a registered child, and the SIGKILL escalation actually fires', async () => {
@@ -602,24 +603,26 @@ await check('sourceChunks.upsertSourceChunk is idempotent on (chapter_id, conten
 // oral-examiner state parsing & validation (Phase 4)
 // ---------------------------------------------------------------------------------------
 
-await check('parseExaminerStateBlock accepts a well-formed "asking" block and rejects structural defects', async () => {
+await check('parseExaminerStateBlock accepts a well-formed "advance" transition and rejects structural defects', async () => {
   const { parseExaminerStateBlock } = await import('../oral-session/stateParser.js');
-  const ok = '<oral-examiner-state>{"phase":"asking","slot_id":"s1","question_text":"Câu hỏi?","bloom_level":"remember","source_chunk_ids":["c1"],"next_action":"awaiting_answer","stop_reason":null}</oral-examiner-state>';
+  const ok = '<oral-examiner-state>{"action":"advance","slot_id":"s1","question_text":"Câu hỏi?","source_chunk_ids":["c1"],"disposition":"continue","completion_reason":null}</oral-examiner-state>';
   const parsed = parseExaminerStateBlock(`Some preamble text.\n${ok}`);
-  assert.equal(parsed.phase, 'asking');
+  assert.equal(parsed.action, 'advance');
   assert.equal(parsed.slot_id, 's1');
   assert.deepEqual(parsed.source_chunk_ids, ['c1']);
 
   assert.throws(() => parseExaminerStateBlock('no state block here'));
   assert.throws(() => parseExaminerStateBlock(`${ok}${ok}`), 'duplicate blocks must be rejected');
   assert.throws(() => parseExaminerStateBlock(`${ok} trailing junk`), 'trailing content after the block must be rejected');
-  assert.throws(() => parseExaminerStateBlock('<oral-examiner-state>{"phase":"asking"}</oral-examiner-state>'), 'missing required fields must be rejected');
-  assert.throws(() => parseExaminerStateBlock('<oral-examiner-state>{"phase":"asking","slot_id":"s1","question_text":"x","bloom_level":"remember","source_chunk_ids":[],"next_action":"awaiting_answer","stop_reason":null}</oral-examiner-state>'), 'empty source_chunk_ids must be rejected');
-  assert.throws(() => parseExaminerStateBlock('<oral-examiner-state>{"phase":"done","slot_id":"s1","next_action":"none","stop_reason":"not_a_real_reason"}</oral-examiner-state>'), 'unknown stop_reason must be rejected');
+  assert.throws(() => parseExaminerStateBlock('<oral-examiner-state>{"action":"advance"}</oral-examiner-state>'), 'missing required fields must be rejected');
+  assert.throws(() => parseExaminerStateBlock('<oral-examiner-state>{"action":"advance","slot_id":"s1","question_text":"x","source_chunk_ids":[],"disposition":"continue","completion_reason":null}</oral-examiner-state>'), 'empty source_chunk_ids must be rejected');
+  assert.throws(() => parseExaminerStateBlock('<oral-examiner-state>{"action":"close","slot_id":"s1","disposition":"complete","completion_reason":"not_a_real_reason"}</oral-examiner-state>'), 'unknown completion_reason must be rejected');
+  assert.throws(() => parseExaminerStateBlock('<oral-examiner-state>{"action":"close","slot_id":"s1","disposition":"continue","completion_reason":null}</oral-examiner-state>'), 'disposition must be "complete" when action is "close"');
+  assert.throws(() => parseExaminerStateBlock('<oral-examiner-state>{"action":"probe","slot_id":"s1"}</oral-examiner-state>'), 'action outside "close" still requires question_text/source_chunk_ids');
 });
 
-await check('validateExaminerQuestionAgainstSlot rejects a citation outside the slot\'s assigned chapter, and a bloom_level mismatch', async () => {
-  const { parseExaminerStateBlock, validateExaminerQuestionAgainstSlot } = await import('../oral-session/stateParser.js');
+await check('validateExaminerTransitionAgainstSlot rejects a citation outside the slot\'s assigned chapter, and returns the slot\'s own bloom_level', async () => {
+  const { parseExaminerStateBlock, validateExaminerTransitionAgainstSlot } = await import('../oral-session/stateParser.js');
   const { listSlotsForBlueprint } = await import('../db/blueprints.js');
   const { upsertSourceChunk } = await import('../db/sourceChunks.js');
   const { createHash } = await import('node:crypto');
@@ -628,21 +631,20 @@ await check('validateExaminerQuestionAgainstSlot rejects a citation outside the 
   const text = `test-chunk-${uuidv4()}`;
   const chunkId = upsertSourceChunk({ chapterId: slot.chapter_id, pdfPage: 1, printedPage: 1, contentHash: createHash('sha256').update(text).digest('hex'), text, charStart: 0, charEnd: text.length });
 
-  // Valid citation + correct bloom_level: passes and returns the slot's chapter/CLO.
-  const validState = parseExaminerStateBlock(`<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slot.slot_id, question_text: 'x', bloom_level: slot.bloom_level, source_chunk_ids: [chunkId], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`);
-  const result = validateExaminerQuestionAgainstSlot(validState);
+  // Valid citation: passes and returns the slot's own chapter/CLO/bloom_level — never an
+  // agent-echoed value, since bloom_level is not part of the wire contract at all.
+  const validState = parseExaminerStateBlock(`<oral-examiner-state>${JSON.stringify({ action: 'advance', slot_id: slot.slot_id, question_text: 'x', source_chunk_ids: [chunkId], disposition: 'continue', completion_reason: null })}</oral-examiner-state>`);
+  const result = validateExaminerTransitionAgainstSlot(validState);
   assert.equal(result.chapterId, slot.chapter_id);
   assert.equal(result.cloId, slot.clo_id);
+  assert.equal(result.bloomLevel, slot.bloom_level);
 
   // Citation to a chunk from a DIFFERENT chapter must be rejected.
   const otherSlot = listSlotsForBlueprint('bp_swt_demo_v1')[0];
   const otherText = `other-chunk-${uuidv4()}`;
   const otherChunkId = upsertSourceChunk({ chapterId: otherSlot.chapter_id, pdfPage: 1, printedPage: 1, contentHash: createHash('sha256').update(otherText).digest('hex'), text: otherText, charStart: 0, charEnd: otherText.length });
-  const outOfScopeState = parseExaminerStateBlock(`<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slot.slot_id, question_text: 'x', bloom_level: slot.bloom_level, source_chunk_ids: [otherChunkId], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`);
-  assert.throws(() => validateExaminerQuestionAgainstSlot(outOfScopeState), /not part of slot/);
-
-  const wrongBloom = parseExaminerStateBlock(`<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slot.slot_id, question_text: 'x', bloom_level: 'create', source_chunk_ids: [chunkId], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`);
-  assert.throws(() => validateExaminerQuestionAgainstSlot(wrongBloom), /does not match slot/);
+  const outOfScopeState = parseExaminerStateBlock(`<oral-examiner-state>${JSON.stringify({ action: 'advance', slot_id: slot.slot_id, question_text: 'x', source_chunk_ids: [otherChunkId], disposition: 'continue', completion_reason: null })}</oral-examiner-state>`);
+  assert.throws(() => validateExaminerTransitionAgainstSlot(outOfScopeState), /not part of slot/);
 });
 
 // ---------------------------------------------------------------------------------------
@@ -656,6 +658,49 @@ async function registerOralTeacher(): Promise<{ teacherId: string; cookie: strin
   assert.equal(res.statusCode, 201);
   const token = cookieFrom(res, 'oral_test_token')!;
   return { teacherId: res.json().data.teacherId, cookie: `oral_test_token=${token}` };
+}
+
+/** Pulls the JSON context out of a prompt built by promptBuilder.ts's wrapUntrusted wrapper —
+ * used by examiner mocks below so they answer from what the backend actually sent, not a fixture
+ * baked into the test. */
+function parseUntrustedContext(prompt: string): any {
+  const match = prompt.match(/<untrusted_group_input>\n([\s\S]*?)\n<\/untrusted_group_input>/);
+  assert.ok(match, 'prompt must wrap its context as untrusted input');
+  return JSON.parse(match![1]);
+}
+
+function examinerBlock(fields: Record<string, unknown>): string {
+  return `<oral-examiner-state>${JSON.stringify(fields)}</oral-examiner-state>`;
+}
+
+/** Faithful stand-in for a compliant oral-examiner skill: advances through whatever slot the
+ * backend currently offers, and closes (coverage_verified) once `advance` is no longer allowed —
+ * driven entirely by the prompt's own allowed_actions/next_slot, never a fixture. */
+async function mockExaminerAlwaysAdvance(_oralSessionId: string, claudeSessionId: string | null, prompt: string) {
+  // Echoes back the CLI session id it was actually resumed with (falling back to a fresh,
+  // per-oral-session id only on the first call) rather than a single shared literal — so a bug
+  // that crossed session ids between two DIFFERENT oral sessions would surface as a mismatch
+  // instead of two calls to the same literal masking it.
+  const resolvedClaudeSessionId = claudeSessionId ?? `mock-cli-session-${_oralSessionId}`;
+  const context = parseUntrustedContext(prompt);
+  if (context.turn === 'start') {
+    const chunkId = context.source_chunks[0].chunk_id;
+    return {
+      text: examinerBlock({ action: 'advance', slot_id: context.target_slot.slot_id, question_text: `Câu hỏi cho ${context.target_slot.slot_id}?`, source_chunk_ids: [chunkId], disposition: 'continue', completion_reason: null }),
+      claudeSessionId: resolvedClaudeSessionId,
+    };
+  }
+  if (context.allowed_actions.includes('advance')) {
+    const chunkId = context.next_slot.source_chunks[0].chunk_id;
+    return {
+      text: examinerBlock({ action: 'advance', slot_id: context.next_slot.slot_id, question_text: `Câu hỏi cho ${context.next_slot.slot_id}?`, source_chunk_ids: [chunkId], disposition: 'continue', completion_reason: null }),
+      claudeSessionId: resolvedClaudeSessionId,
+    };
+  }
+  return {
+    text: examinerBlock({ action: 'close', slot_id: context.current_slot_id, question_text: '', source_chunk_ids: [], disposition: 'complete', completion_reason: 'coverage_verified' }),
+    claudeSessionId: resolvedClaudeSessionId,
+  };
 }
 
 await check('GET /blueprints lists the seeded demo blueprints; there is no mutation route (seed-only design)', async () => {
@@ -704,12 +749,7 @@ await check('POST /sessions requires auth, materializes a validated first questi
   const { cookie } = await registerOralTeacher();
   const slot0 = listSlotsForBlueprint('bp_swr_demo_v1')[0];
 
-  (spawn.runRawFreshSession as any).setForTests(async (_ctx: string, prompt: string) => {
-    // The prompt embeds the assigned chunk id(s) — pull the first one back out to cite legitimately.
-    const match = prompt.match(/"chunk_id":\s*"([^"]+)"/);
-    const chunkId = match![1];
-    return `<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slot0.slot_id, question_text: 'Câu hỏi kiểm tra?', bloom_level: slot0.bloom_level, source_chunk_ids: [chunkId], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`;
-  });
+  (spawn.runExaminerTransition as any).setForTests(mockExaminerAlwaysAdvance);
   try {
     const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWR', studentCode: 'SV001' } });
     assert.equal(start.statusCode, 201);
@@ -718,6 +758,7 @@ await check('POST /sessions requires auth, materializes a validated first questi
     assert.equal(body.blueprintId, 'bp_swr_demo_v1', 'the only SWR blueprint in this demo dataset must be the one randomly drawn');
     assert.ok(body.question, 'first question must be materialized synchronously');
     assert.equal(body.question.slotId, slot0.slot_id);
+    assert.equal(body.question.action, 'advance');
     assert.ok(body.question.sourceChunkIds.length > 0);
 
     const wrongOwnerGet = await inject({ method: 'GET', url: `/api/v1/oral-test/sessions/${body.sessionId}` });
@@ -734,7 +775,7 @@ await check('POST /sessions requires auth, materializes a validated first questi
     assert.equal(turn.statusCode, 201);
     assert.ok(turn.json().data.nextQuestion, 'slot0 needs more than one question, so a next question must follow');
   } finally {
-    (spawn.runRawFreshSession as any).setForTests(null);
+    (spawn.runExaminerTransition as any).setForTests(null);
   }
 });
 
@@ -751,14 +792,16 @@ await check('a citation outside the assigned chunk set is rejected, never persis
   const { cookie } = await registerOralTeacher();
   const slot0 = listSlotsForBlueprint('bp_swt_demo_v1')[0];
 
-  (spawn.runRawFreshSession as any).setForTests(async () =>
-    `<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slot0.slot_id, question_text: 'x', bloom_level: slot0.bloom_level, source_chunk_ids: ['not-a-real-chunk-id'], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`);
+  (spawn.runExaminerTransition as any).setForTests(async () => ({
+    text: `<oral-examiner-state>${JSON.stringify({ action: 'advance', slot_id: slot0.slot_id, question_text: 'x', source_chunk_ids: ['not-a-real-chunk-id'], disposition: 'continue', completion_reason: null })}</oral-examiner-state>`,
+    claudeSessionId: 'mock-cli-session',
+  }));
   try {
     const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWT', studentCode: 'SV002' } });
     assert.equal(start.statusCode, 500, 'an out-of-scope citation must surface as a server error, not a 201 with a bad question');
     assert.equal(start.json().isSuccess, false);
   } finally {
-    (spawn.runRawFreshSession as any).setForTests(null);
+    (spawn.runExaminerTransition as any).setForTests(null);
   }
 });
 
@@ -771,12 +814,12 @@ await check('malformed skill JSON is rejected (no silent best-effort persist)', 
     upsertSourceChunk({ chapterId, pdfPage: 1, printedPage: 1, contentHash: createHash('sha256').update(text).digest('hex'), text, charStart: 0, charEnd: text.length });
   }
   const { cookie } = await registerOralTeacher();
-  (spawn.runRawFreshSession as any).setForTests(async () => 'not even close to a state block');
+  (spawn.runExaminerTransition as any).setForTests(async () => ({ text: 'not even close to a state block', claudeSessionId: 'mock-cli-session' }));
   try {
     const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWT', studentCode: 'SV003' } });
     assert.equal(start.statusCode, 500);
   } finally {
-    (spawn.runRawFreshSession as any).setForTests(null);
+    (spawn.runExaminerTransition as any).setForTests(null);
   }
 });
 
@@ -791,19 +834,23 @@ await check('prompt-injection text embedded in a source chunk does not break the
   }
   const { cookie } = await registerOralTeacher();
   const slot0 = listSlotsForBlueprint('bp_swr_demo_v1')[0];
-  (spawn.runRawFreshSession as any).setForTests(async (_ctx: string, prompt: string) => {
+  (spawn.runExaminerTransition as any).setForTests(async (_oralSessionId: string, _claudeSessionId: string | null, prompt: string) => {
     // A real skill is instructed to treat the wrapped chunk text as data, not a command — assert
     // the wrapper is actually present around the injected text, then behave as a compliant skill would.
     assert.equal(prompt.includes('<untrusted_group_input>'), true, 'source chunk text must reach the CLI wrapped as untrusted');
-    const match = prompt.match(/"chunk_id":\s*"([^"]+)"/);
-    return `<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slot0.slot_id, question_text: 'Câu hỏi bình thường?', bloom_level: slot0.bloom_level, source_chunk_ids: [match![1]], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`;
+    const context = parseUntrustedContext(prompt);
+    const chunkId = context.source_chunks[0].chunk_id;
+    return {
+      text: `<oral-examiner-state>${JSON.stringify({ action: 'advance', slot_id: slot0.slot_id, question_text: 'Câu hỏi bình thường?', source_chunk_ids: [chunkId], disposition: 'continue', completion_reason: null })}</oral-examiner-state>`,
+      claudeSessionId: 'mock-cli-session',
+    };
   });
   try {
     const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWR', studentCode: 'SV004' } });
     assert.equal(start.statusCode, 201);
     assert.equal(start.json().data.question.questionText, 'Câu hỏi bình thường?');
   } finally {
-    (spawn.runRawFreshSession as any).setForTests(null);
+    (spawn.runExaminerTransition as any).setForTests(null);
   }
 });
 
@@ -834,6 +881,221 @@ async function seedCompletedOralSession(teacherId: string, studentCode: string) 
 function reviewOutputBlock(items: Array<{ question_id: string; ai_suggested_level: string; evidence_turn_ids: string[]; rationale: string }>) {
   return `<oral-review-output>${JSON.stringify({ items })}</oral-review-output>`;
 }
+
+// ---------------------------------------------------------------------------------------
+// Persisted CLI session binding + durable submit-turn idempotency (claude-native-agent-runtime
+// plan.md, Phase 1/5 reduced scope): the examiner's CLI session id is created once and reused via
+// --resume, and a retried/stale submitOralTurn call never invokes the examiner twice or produces
+// a second student turn.
+// ---------------------------------------------------------------------------------------
+
+async function seedInProgressSessionForIdempotency(teacherId: string, studentCode: string) {
+  const { upsertSourceChunk } = await import('../db/sourceChunks.js');
+  const { createHash } = await import('node:crypto');
+  for (const chapterId of ['SWR-1', 'SWR-2', 'SWR-3']) {
+    const text = `idem-${chapterId}-${uuidv4()}`;
+    upsertSourceChunk({ chapterId, pdfPage: 1, printedPage: 1, contentHash: createHash('sha256').update(text).digest('hex'), text, charStart: 0, charEnd: text.length });
+  }
+  const { startOralTestSession } = await import('../oral-session/startSession.js');
+  const spawn = await import('../claude-cli/spawn.js');
+  (spawn.runExaminerTransition as any).setForTests(mockExaminerAlwaysAdvance);
+  try {
+    const { session, firstQuestion } = await startOralTestSession({ courseId: 'SWR', teacherId, studentCode });
+    return { session, firstQuestion: firstQuestion! };
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+}
+
+await check('the examiner CLI session id is created once and reused via --resume on the next turn', async () => {
+  const spawn = await import('../claude-cli/spawn.js');
+  const { getOralSession } = await import('../db/oralSessions.js');
+  const { teacherId } = await registerOralTeacher();
+  const { session, firstQuestion } = await seedInProgressSessionForIdempotency(teacherId, 'SV030');
+
+  const afterFirstCall = getOralSession(session.session_id);
+  assert.ok(afterFirstCall?.claude_session_id, 'the first (new) examiner call must persist a claude_session_id');
+
+  const seenClaudeSessionIds: Array<string | null> = [];
+  (spawn.runExaminerTransition as any).setForTests(async (_oralSessionId: string, claudeSessionId: string | null, prompt: string) => {
+    seenClaudeSessionIds.push(claudeSessionId);
+    return mockExaminerAlwaysAdvance(_oralSessionId, claudeSessionId, prompt);
+  });
+  try {
+    const { submitOralTurn } = await import('../oral-session/submitTurn.js');
+    await submitOralTurn({ sessionId: session.session_id, questionId: firstQuestion.question_id, inputMode: 'typed', text: 'Trả lời.' });
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+  assert.equal(seenClaudeSessionIds.length, 1);
+  assert.equal(seenClaudeSessionIds[0], afterFirstCall!.claude_session_id, 'the resumed call must pass back the exact id the first call returned');
+});
+
+await check('a retried identical turn submission replays its stored result instead of calling the examiner twice', async () => {
+  const spawn = await import('../claude-cli/spawn.js');
+  const { teacherId } = await registerOralTeacher();
+  const { session, firstQuestion } = await seedInProgressSessionForIdempotency(teacherId, 'SV031');
+
+  let calls = 0;
+  (spawn.runExaminerTransition as any).setForTests(async (a: string, b: string | null, prompt: string) => { calls += 1; return mockExaminerAlwaysAdvance(a, b, prompt); });
+  try {
+    const { submitOralTurn } = await import('../oral-session/submitTurn.js');
+    const first = await submitOralTurn({ sessionId: session.session_id, questionId: firstQuestion.question_id, inputMode: 'typed', text: 'Trả lời của học sinh.' });
+    assert.equal(calls, 1);
+    const retry = await submitOralTurn({ sessionId: session.session_id, questionId: firstQuestion.question_id, inputMode: 'typed', text: 'Trả lời của học sinh.' });
+    assert.equal(calls, 1, 'an identical retry must not invoke the examiner a second time');
+    assert.equal(retry.turn.turn_id, first.turn.turn_id);
+    assert.equal(retry.nextQuestion?.question_id, first.nextQuestion?.question_id);
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+});
+
+await check('a retried turn submission with different text than the recorded one is a 409 conflict, not a silent overwrite', async () => {
+  const spawn = await import('../claude-cli/spawn.js');
+  const { teacherId } = await registerOralTeacher();
+  const { session, firstQuestion } = await seedInProgressSessionForIdempotency(teacherId, 'SV032');
+
+  (spawn.runExaminerTransition as any).setForTests(mockExaminerAlwaysAdvance);
+  try {
+    const { submitOralTurn, SubmissionConflictError } = await import('../oral-session/submitTurn.js');
+    await submitOralTurn({ sessionId: session.session_id, questionId: firstQuestion.question_id, inputMode: 'typed', text: 'Câu trả lời gốc.' });
+    await assert.rejects(
+      () => submitOralTurn({ sessionId: session.session_id, questionId: firstQuestion.question_id, inputMode: 'typed', text: 'Một câu trả lời khác.' }),
+      SubmissionConflictError,
+    );
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+});
+
+await check('a stale retry arriving after the session has already completed still replays its original result', async () => {
+  const spawn = await import('../claude-cli/spawn.js');
+  const { teacherId } = await registerOralTeacher();
+  const { session, firstQuestion } = await seedInProgressSessionForIdempotency(teacherId, 'SV033');
+  const { listSlotsForBlueprint } = await import('../db/blueprints.js');
+  const totalQuestions = listSlotsForBlueprint('bp_swr_demo_v1').reduce((sum, s) => sum + s.question_count, 0);
+
+  (spawn.runExaminerTransition as any).setForTests(mockExaminerAlwaysAdvance);
+  let questionId = firstQuestion.question_id;
+  let firstResult: { turn: { turn_id: string }; nextQuestion: unknown } | undefined;
+  try {
+    const { submitOralTurn } = await import('../oral-session/submitTurn.js');
+    for (let i = 0; i < totalQuestions; i += 1) {
+      const result = await submitOralTurn({ sessionId: session.session_id, questionId, inputMode: 'typed', text: `Trả lời số ${i}.` });
+      if (i === 0) firstResult = result;
+      if (result.nextQuestion) questionId = result.nextQuestion.question_id;
+    }
+    const { getOralSession } = await import('../db/oralSessions.js');
+    assert.equal(getOralSession(session.session_id)?.status, 'completed', 'every slot answered must complete the session');
+
+    // Retrying the FIRST submission after the whole session has since completed must still
+    // replay cleanly — status is no longer in_progress, but the idempotency check runs first.
+    const staleRetry = await submitOralTurn({ sessionId: session.session_id, questionId: firstQuestion.question_id, inputMode: 'typed', text: 'Trả lời số 0.' });
+    assert.equal(staleRetry.turn.turn_id, firstResult!.turn.turn_id);
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+});
+
+await check('a retry after the examiner call itself failed reuses the already-committed turn instead of rejecting it as already-answered', async () => {
+  // Regression coverage for a real crash window: submitOralTurn records the student's turn BEFORE
+  // calling the examiner, so a CLI timeout/malformed-output failure between those two writes
+  // leaves a turn with no turn_submissions row. Without recovery, a same-content retry would 409
+  // as "already answered" and strand the session forever (see submitTurn.ts's crash-recovery
+  // comment).
+  const spawn = await import('../claude-cli/spawn.js');
+  const { teacherId } = await registerOralTeacher();
+  const { session, firstQuestion } = await seedInProgressSessionForIdempotency(teacherId, 'SV034');
+  const { getTurnSubmission } = await import('../db/turnSubmissions.js');
+  const { listTurnsForQuestion } = await import('../db/questions.js');
+  const { submitOralTurn } = await import('../oral-session/submitTurn.js');
+
+  (spawn.runExaminerTransition as any).setForTests(async () => { throw new Error('simulated CLI timeout'); });
+  try {
+    await assert.rejects(() => submitOralTurn({ sessionId: session.session_id, questionId: firstQuestion.question_id, inputMode: 'typed', text: 'Trả lời của học sinh.' }));
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+  assert.equal(getTurnSubmission(session.session_id, firstQuestion.question_id), undefined, 'the failed call must not have recorded an idempotency row');
+  const turnsAfterFailure = listTurnsForQuestion(firstQuestion.question_id);
+  assert.equal(turnsAfterFailure.length, 1, 'the turn itself must have committed despite the examiner call failing');
+
+  (spawn.runExaminerTransition as any).setForTests(mockExaminerAlwaysAdvance);
+  try {
+    const retry = await submitOralTurn({ sessionId: session.session_id, questionId: firstQuestion.question_id, inputMode: 'typed', text: 'Trả lời của học sinh.' });
+    assert.equal(retry.turn.turn_id, turnsAfterFailure[0].turn_id, 'the retry must reuse the turn already committed, not create a second one');
+    assert.ok(retry.nextQuestion, 'a successful retry must still produce the next question');
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+  assert.equal(listTurnsForQuestion(firstQuestion.question_id).length, 1, 'no duplicate turn must exist after a successful retry');
+});
+
+await check('when close is the only legal action, the session ends deterministically without an extra examiner call', async () => {
+  // Regression coverage: once a follow-up has been used on the item AND no slot is pending,
+  // 'close' is the only allowed action — the outcome is already fully determined by DB state, so
+  // askNextQuestionLocked must end the session itself rather than spending an avoidable (and
+  // IllegalExaminerActionError-risking) CLI call to ask for a foregone conclusion.
+  const spawn = await import('../claude-cli/spawn.js');
+  const { teacherId } = await registerOralTeacher();
+  const { createOralSession } = await import('../db/oralSessions.js');
+  const { listSlotsForBlueprint } = await import('../db/blueprints.js');
+  const singleSlotBlueprintId = 'bp_swr_demo_v1';
+  const onlySlot = listSlotsForBlueprint(singleSlotBlueprintId)[0];
+  const session = createOralSession({ blueprintId: singleSlotBlueprintId, teacherId, studentCode: 'SV035' });
+
+  let calls = 0;
+  (spawn.runExaminerTransition as any).setForTests(async (a: string, b: string | null, prompt: string) => { calls += 1; return mockExaminerAlwaysAdvance(a, b, prompt); });
+  const { askNextQuestionLocked } = await import('../oral-session/questionEngine.js');
+  const { createQuestion } = await import('../db/questions.js');
+  try {
+    // Fabricate every slot's quota already met, plus one follow-up already used on the last
+    // primary question — the exact state where allowed=['close'] is the only legal move.
+    const allSlots = listSlotsForBlueprint(singleSlotBlueprintId);
+    let lastPrimary;
+    for (const slot of allSlots) {
+      for (let i = 0; i < slot.question_count; i += 1) {
+        lastPrimary = createQuestion({
+          sessionId: session.session_id, slotId: slot.slot_id, chapterId: slot.chapter_id, cloId: slot.clo_id,
+          bloomLevel: slot.bloom_level, sourceChunkIds: ['whatever'], questionText: `q ${slot.slot_id}-${i}?`,
+          promptVersion: 'v', modelVersion: 'v', action: 'advance',
+        });
+      }
+    }
+    const followUp = createQuestion({
+      sessionId: session.session_id, slotId: onlySlot.slot_id, chapterId: onlySlot.chapter_id, cloId: onlySlot.clo_id,
+      bloomLevel: onlySlot.bloom_level, sourceChunkIds: ['whatever'], questionText: 'follow-up?', promptVersion: 'v', modelVersion: 'v',
+      action: 'probe', parentQuestionId: lastPrimary!.question_id, consumesQuota: false,
+    });
+    const result = await askNextQuestionLocked(session.session_id, followUp);
+    assert.equal(result, null, 'no pending slot and no follow-up left must close the session');
+    assert.equal(calls, 0, 'a deterministically-known outcome must never spend an examiner CLI call');
+    const { getOralSession } = await import('../db/oralSessions.js');
+    assert.equal(getOralSession(session.session_id)?.status, 'completed');
+    assert.equal(getOralSession(session.session_id)?.completion_reason, 'coverage_verified');
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+});
+
+await check('buildClaudeArgs never auto-accepts edits and grants neither role any tool', () => {
+  const spawn2 = claudeSpawn;
+  const examinerArgs = spawn2.buildClaudeArgs({ session: { mode: 'new', id: 's1' }, role: 'examiner' });
+  const reviewerArgs = spawn2.buildClaudeArgs({ session: { mode: 'new', id: 's2' }, role: 'reviewer' });
+  for (const args of [examinerArgs, reviewerArgs]) {
+    assert.equal(args.includes('acceptEdits'), false, 'acceptEdits must never be used — it auto-approves the whole edit family regardless of role');
+    const modeAt = args.indexOf('--permission-mode');
+    assert.equal(args[modeAt + 1], 'default', 'permission-mode must be the deny-unless-listed default, not an auto-accept mode');
+    assert.equal(args.some((a) => a.startsWith('--allowedTools')), false, 'neither role needs any tool — both receive all material via the prompt itself');
+  }
+
+  const resumeArgs = spawn2.buildClaudeArgs({ session: { mode: 'resume', id: 'existing-id' }, role: 'examiner' });
+  const resumeAt = resumeArgs.indexOf('--resume');
+  assert.ok(resumeAt >= 0 && resumeArgs[resumeAt + 1] === 'existing-id', 'resuming a persisted session must use --resume, not --session-id');
+  const newArgs = spawn2.buildClaudeArgs({ session: { mode: 'new', id: 'fresh-id' }, role: 'examiner' });
+  assert.equal(newArgs.includes('--resume'), false, 'a brand-new session must use --session-id, not --resume');
+});
 
 await check('POST /sessions/:id/review drafts a report+items (never approved) from a completed session, and rejects a re-run', async () => {
   const spawn = await import('../claude-cli/spawn.js');
@@ -970,16 +1232,10 @@ async function runFullCoursePackE2E(courseId: string, blueprintId: string, chapt
   const slots = listSlotsForBlueprint(blueprintId);
   const totalQuestions = slots.reduce((sum, s) => sum + s.question_count, 0);
 
-  // Answers the currently-pending slot each call, reading slot_id/bloom_level/chunk_id straight
-  // back out of the prompt this session's own promptBuilder produced — a faithful stand-in for
-  // "the real skill reads its assigned context and cites it", without invoking the CLI.
-  spawn.runRawFreshSession.setForTests(async (_ctx, prompt) => {
-    const slotId = prompt.match(/"slot_id":\s*"([^"]+)"/)?.[1];
-    const bloomLevel = prompt.match(/"bloom_level":\s*"([^"]+)"/)?.[1];
-    const chunkId = prompt.match(/"chunk_id":\s*"([^"]+)"/)?.[1];
-    assert.ok(slotId && bloomLevel && chunkId, 'prompt must carry slot_id/bloom_level/chunk_id for the mock to answer faithfully');
-    return `<oral-examiner-state>${JSON.stringify({ phase: 'asking', slot_id: slotId, question_text: `Câu hỏi cho ${slotId}?`, bloom_level: bloomLevel, source_chunk_ids: [chunkId], next_action: 'awaiting_answer', stop_reason: null })}</oral-examiner-state>`;
-  });
+  // Answers the currently-pending slot each call, reading it straight back out of the prompt this
+  // session's own promptBuilder produced — a faithful stand-in for "the real skill reads its
+  // assigned context and cites it", without invoking the CLI.
+  (spawn.runExaminerTransition as any).setForTests(mockExaminerAlwaysAdvance);
   let sessionId: string;
   let questionId: string;
   try {
@@ -999,8 +1255,9 @@ async function runFullCoursePackE2E(courseId: string, blueprintId: string, chapt
     const lastTurn = await inject({ method: 'POST', url: `/api/v1/oral-test/sessions/${sessionId}/turns`, headers: { cookie }, payload: { questionId, inputMode: 'typed', text: 'Trả lời cuối cùng của học sinh.' } });
     assert.equal(lastTurn.statusCode, 201);
     assert.equal(lastTurn.json().data.nextQuestion, null, 'the final slot must not produce another question');
+    assert.equal(lastTurn.json().data.completionReason, 'coverage_verified', 'every slot answered must verify coverage, not an early end');
   } finally {
-    spawn.runRawFreshSession.setForTests(null);
+    (spawn.runExaminerTransition as any).setForTests(null);
   }
 
   const { listQuestionsForSession } = await import('../db/questions.js');
@@ -1056,13 +1313,13 @@ await check('oral-examiner: a CLI timeout/rejection surfaces as a clean server e
     upsertSourceChunk({ chapterId, pdfPage: 1, printedPage: 1, contentHash: createHash('sha256').update(text).digest('hex'), text, charStart: 0, charEnd: text.length });
   }
   const { cookie } = await registerOralTeacher();
-  spawn.runRawFreshSession.setForTests(async () => { throw new Error('claude deadline exceeded'); });
+  (spawn.runExaminerTransition as any).setForTests(async () => { throw new Error('claude deadline exceeded'); });
   try {
     const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWR', studentCode: 'SV022' } });
     assert.equal(start.statusCode, 500);
     assert.equal(start.json().isSuccess, false);
   } finally {
-    spawn.runRawFreshSession.setForTests(null);
+    (spawn.runExaminerTransition as any).setForTests(null);
   }
 });
 

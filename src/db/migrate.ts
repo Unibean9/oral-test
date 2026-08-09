@@ -527,6 +527,49 @@ function migrationV8(db: Database.Database): void {
   db.exec('ALTER TABLE teachers ADD COLUMN password_hash TEXT');
 }
 
+/**
+ * Claude-native examiner runtime (see plans/260810-0417-claude-native-agent-runtime/):
+ * `assessment_sessions.claude_session_id` binds one persisted, resumed CLI session to one oral
+ * session. `completion_reason`/`coverage_snapshot_hash` record whether a session ended because
+ * every blueprint slot was verified answered or because it was cut short, and a hash of the
+ * slot-coverage counts at that moment — never recomputed later from possibly-mutated rows.
+ *
+ * `questions` gains `action`/`parent_question_id`/`consumes_quota` so the same table can hold both
+ * a primary item (`action='advance'`, `parent_question_id` NULL, `consumes_quota=1`, the only kind
+ * that counts against a blueprint slot's `question_count`) and its at-most-one follow-up
+ * (`action` one of probe/clarify/challenge/redirect, `parent_question_id` pointing back to the
+ * primary, `consumes_quota=0`) without a second parallel table or touching any existing
+ * `oral_turns`/`rubric_items`/`reports` foreign key.
+ *
+ * `turn_submissions` is the durable idempotency record for one submitted answer: the same
+ * (session_id, question_id) with the same request fingerprint replays its stored result; a
+ * different fingerprint is a conflict, checked before any CLI call.
+ *
+ * All additive — constant/NULL defaults, no table rebuild.
+ */
+function migrationV9(db: Database.Database): void {
+  db.exec("ALTER TABLE assessment_sessions ADD COLUMN claude_session_id TEXT");
+  db.exec("ALTER TABLE assessment_sessions ADD COLUMN completion_reason TEXT CHECK(completion_reason IN ('coverage_verified','ended_early'))");
+  db.exec("ALTER TABLE assessment_sessions ADD COLUMN coverage_snapshot_hash TEXT");
+
+  db.exec("ALTER TABLE questions ADD COLUMN action TEXT NOT NULL DEFAULT 'advance' CHECK(action IN ('advance','probe','clarify','challenge','redirect'))");
+  db.exec("ALTER TABLE questions ADD COLUMN parent_question_id TEXT REFERENCES questions(question_id)");
+  db.exec("ALTER TABLE questions ADD COLUMN consumes_quota INTEGER NOT NULL DEFAULT 1 CHECK(consumes_quota IN (0,1))");
+
+  db.exec(`
+    CREATE TABLE turn_submissions (
+      session_id          TEXT NOT NULL REFERENCES assessment_sessions(session_id),
+      question_id         TEXT NOT NULL REFERENCES questions(question_id),
+      request_fingerprint TEXT NOT NULL,
+      turn_id             TEXT NOT NULL,
+      next_question_id    TEXT,
+      session_completed   INTEGER NOT NULL DEFAULT 0,
+      created_at          TEXT NOT NULL,
+      PRIMARY KEY (session_id, question_id)
+    );
+  `);
+}
+
 const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) => void; nonAdditive?: boolean }> = [
   { version: 1, up: migrationV1 },
   { version: 2, up: migrationV2, nonAdditive: true },
@@ -536,6 +579,7 @@ const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) => void; 
   { version: 6, up: migrationV6 },
   { version: 7, up: migrationV7 },
   { version: 8, up: migrationV8 },
+  { version: 9, up: migrationV9 },
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -13,8 +13,8 @@
  * Usage:
  *   tsx scripts/ingest-demo-chapters.ts --pdf-dir <dir containing the two source PDFs>
  *
- * Never commit or sync the extracted text: it stays local-only in the SQLite DB (data/rooms.db,
- * already gitignored) — same trust boundary as the rest of that file.
+ * The source PDFs ship only in the private POC repository and seed image. Extracted text still
+ * stays in the SQLite DB (data/rooms.db), which remains runtime data and is gitignored.
  */
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -95,7 +95,7 @@ async function main() {
 
     const pdfPath = path.resolve(pdfDir, chapter.sourceFile);
     if (!fs.existsSync(pdfPath)) {
-      throw new Error(`Source PDF not found: ${pdfPath}. Place the book PDFs locally and pass --pdf-dir pointing at them; they are never committed to this repo.`);
+      throw new Error(`Source PDF not found: ${pdfPath}. Ensure both private POC PDFs are present and pass --pdf-dir pointing at them.`);
     }
 
     let chapterChunks = 0;

@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+node_modules
+out
+data
+*.log
+*.bak
+*.bak-wal
+*.bak-shm
+plans
+docs
+**/.pyenv-tts*
+**/__pycache__
+**/*.pyc

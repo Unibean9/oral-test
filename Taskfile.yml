@@ -21,23 +21,10 @@ vars:
 
 tasks:
   setup:
-    desc: Install backend node_modules, the deck renderer's own deps, and the tts-sidecar venv.
+    desc: Install backend node_modules, and the tts-sidecar venv.
     cmds:
       - npm install
-      - task: deck-deps
       - task: venv
-
-  deck-deps:
-    internal: true
-    # The deck renderer is a SEPARATE dependency tree on purpose — see docs/code-standards.md
-    # and the cwd note in src/routes/sessionArtifacts.ts's renderDeck(). Root `npm install`
-    # does not reach it, so a fresh clone has no puppeteer and both the renderPdf test and
-    # PDF export fail with MODULE_NOT_FOUND.
-    dir: scripts/deck
-    status:
-      - test -d node_modules/puppeteer
-    cmds:
-      - npm install
 
   venv:
     internal: true
@@ -51,6 +38,14 @@ tasks:
   dev:
     desc: Run the backend and the tts-sidecar together (Ctrl+C stops both).
     deps: [dev:backend, dev:tts-sidecar]
+
+  clear:
+    desc: Clear all build artifacts and node_modules/venv dirs.
+    cmds:
+      - rm -rf node_modules
+      - rm -rf "{{.SIDECAR_DIR}}/{{.VENV_REL}}"
+      - rm -rf dist
+      - rm -rf data
 
   dev:backend:
     internal: true

@@ -5,8 +5,10 @@ import { RoomBusyError } from '../claude-cli/lock.js';
 import { getOralSession, resolveOralSessionOwner, listOralSessionsForTeacher, endOralSession } from '../db/oralSessions.js';
 import { listQuestionsForSession, getQuestion } from '../db/questions.js';
 import { startOralTestSession, CourseHasNoBlueprintsError } from '../oral-session/startSession.js';
-import { submitOralTurn, QuestionNotFoundError, QuestionNotInSessionError, SessionNotInProgressError } from '../oral-session/submitTurn.js';
-import { UngroundableSlotError } from '../oral-session/questionEngine.js';
+import {
+  submitOralTurn, QuestionNotFoundError, QuestionNotInSessionError, SessionNotInProgressError, SubmissionConflictError,
+} from '../oral-session/submitTurn.js';
+import { IllegalExaminerActionError } from '../oral-session/questionEngine.js';
 
 export const ORAL_TEST_PREFIX = '/api/v1/oral-test';
 const INPUT_MODES = ['stt', 'typed'] as const;
@@ -17,6 +19,7 @@ function questionDto(q: ReturnType<typeof getQuestion> | null) {
     questionId: q.question_id, sessionId: q.session_id, slotId: q.slot_id, chapterId: q.chapter_id,
     cloId: q.clo_id, bloomLevel: q.bloom_level, sourceChunkIds: JSON.parse(q.source_chunk_ids) as string[],
     questionText: q.question_text, createdAt: q.created_at,
+    action: q.action, parentQuestionId: q.parent_question_id,
   };
 }
 
@@ -32,7 +35,8 @@ function handleEngineError(err: unknown, reply: any): boolean {
   if (err instanceof QuestionNotFoundError) { reply.code(404).send(apiError('question_not_found', err.message)); return true; }
   if (err instanceof QuestionNotInSessionError) { reply.code(422).send(apiError('question_not_in_session', err.message)); return true; }
   if (err instanceof SessionNotInProgressError) { reply.code(409).send(apiError('session_not_in_progress', err.message)); return true; }
-  if (err instanceof UngroundableSlotError) { reply.code(502).send(apiError('ungroundable_slot', err.message)); return true; }
+  if (err instanceof SubmissionConflictError) { reply.code(409).send(apiError('submission_conflict', err.message)); return true; }
+  if (err instanceof IllegalExaminerActionError) { reply.code(502).send(apiError('examiner_illegal_action', err.message)); return true; }
   if (err instanceof RoomBusyError) { reply.code(409).send(apiError('session_busy', err.message)); return true; }
   return false;
 }
@@ -99,9 +103,10 @@ export async function oralSessionRoutes(app: FastifyInstance) {
         const { turn, nextQuestion } = await submitOralTurn({
           sessionId: req.params.sessionId, questionId, inputMode: inputMode as 'stt' | 'typed', text,
         });
+        const completionReason = nextQuestion === null ? getOralSession(req.params.sessionId)?.completion_reason ?? null : null;
         return reply.code(201).send(apiOk({
           turnId: turn.turn_id, questionId: turn.question_id, createdAt: turn.created_at,
-          nextQuestion: questionDto(nextQuestion), sessionCompleted: nextQuestion === null,
+          nextQuestion: questionDto(nextQuestion), sessionCompleted: nextQuestion === null, completionReason,
         }));
       } catch (err) {
         if (handleEngineError(err, reply)) return;

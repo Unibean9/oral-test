@@ -5,6 +5,7 @@ export const ORAL_SESSION_ID_PREFIX = 'os_';
 export const RETENTION_DAYS = 180;
 
 export type OralSessionStatus = 'in_progress' | 'completed' | 'reviewed' | 'approved';
+export type OralSessionCompletionReason = 'coverage_verified' | 'ended_early';
 
 export interface AssessmentSessionRow {
   session_id: string;
@@ -15,6 +16,9 @@ export interface AssessmentSessionRow {
   started_at: string;
   ended_at: string | null;
   expires_at: string;
+  claude_session_id: string | null;
+  completion_reason: OralSessionCompletionReason | null;
+  coverage_snapshot_hash: string | null;
 }
 
 function isOralSessionId(value: string): boolean {
@@ -34,6 +38,7 @@ export function createOralSession(params: { blueprintId: string; teacherId: stri
   return {
     session_id: sessionId, blueprint_id: params.blueprintId, teacher_id: params.teacherId,
     student_code: params.studentCode, status: 'in_progress', started_at: startedAt, ended_at: null, expires_at: expiresAt,
+    claude_session_id: null, completion_reason: null, coverage_snapshot_hash: null,
   };
 }
 
@@ -53,12 +58,36 @@ export function setOralSessionStatus(sessionId: string, status: OralSessionStatu
 }
 
 const endSessionStmt = db.prepare(
-  `UPDATE assessment_sessions SET status = 'completed', ended_at = ? WHERE session_id = ? AND status = 'in_progress'`,
+  `UPDATE assessment_sessions
+   SET status = 'completed', ended_at = ?, completion_reason = ?, coverage_snapshot_hash = ?
+   WHERE session_id = ? AND status = 'in_progress'`,
 );
-/** Compare-and-set: only an `in_progress` session can transition to `completed` here. */
-export function endOralSession(sessionId: string): boolean {
-  const result = endSessionStmt.run(new Date().toISOString(), sessionId);
+/**
+ * Compare-and-set: only an `in_progress` session can transition to `completed` here.
+ * `reason` defaults to `ended_early` — the manual `/end` route and any early-exit call site never
+ * has grounds to claim `coverage_verified`; only questionEngine's normal all-slots-satisfied path
+ * passes that reason explicitly, alongside the coverage snapshot hash it computed.
+ */
+export function endOralSession(
+  sessionId: string,
+  options: { reason?: OralSessionCompletionReason; coverageSnapshotHash?: string } = {},
+): boolean {
+  const result = endSessionStmt.run(
+    new Date().toISOString(), options.reason ?? 'ended_early', options.coverageSnapshotHash ?? null, sessionId,
+  );
   return result.changes > 0;
+}
+
+const setClaudeSessionIdStmt = db.prepare(
+  `UPDATE assessment_sessions SET claude_session_id = ? WHERE session_id = ? AND claude_session_id IS NULL`,
+);
+/**
+ * Sets the session's persisted CLI session id exactly once. The `claude_session_id IS NULL` guard
+ * makes a second call a no-op instead of overwriting an id another concurrent call already bound
+ * — the resumed id, once set, is the one every later turn must `--resume`.
+ */
+export function setClaudeSessionId(sessionId: string, claudeSessionId: string): void {
+  setClaudeSessionIdStmt.run(claudeSessionId, sessionId);
 }
 
 // Ownership check used by ownershipGuard (Phase 2): resolves a session's owning teacher_id, or
