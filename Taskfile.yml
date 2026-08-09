@@ -46,26 +46,13 @@ tasks:
         msg: "pdftotext (Poppler) is required for local demo seeding; install Poppler and retry."
     cmds:
       - npm run ingest:demo -- --pdf-dir assets
-      - task: check:seed-data
+      - npm run check:demo-seed -- --write-manifest
 
   check:seed-data:
-    desc: Verify that every seeded demo chapter has at least one source chunk.
-    preconditions:
-      - sh: test -f "${DB_PATH:-data/rooms.db}"
-        msg: "SQLite database not found; run `task init` or `task setup` first."
+    desc: Verify demo chunks and their source-PDF/registry manifest.
+    deps: [backend:dependencies]
     cmds:
-      - |
-        node -e '
-        const Database = require("better-sqlite3");
-        const db = new Database(process.env.DB_PATH || "data/rooms.db", { readonly: true });
-        try {
-          const expected = ["SWR-1", "SWR-2", "SWR-3", "SWT-1", "SWT-3"];
-          const counts = new Map(db.prepare("SELECT chapter_id, COUNT(*) AS count FROM source_chunks GROUP BY chapter_id").all().map((row) => [row.chapter_id, row.count]));
-          const missing = expected.filter((chapterId) => !(counts.get(chapterId) > 0));
-          if (missing.length > 0) throw new Error(`missing source chunks for ${missing.join(", ")}`);
-          console.log(`[seed] verified ${expected.length} demo chapters`);
-        } finally { db.close(); }
-        '
+      - npm run check:demo-seed
 
   check:claude:
     desc: Verify that the local Claude CLI is installed, authenticated, and usable by the backend.
@@ -84,7 +71,7 @@ tasks:
   backend:dependencies:
     internal: true
     status:
-      - test -f node_modules/.package-lock.json && test node_modules/.package-lock.json -nt package-lock.json && test node_modules/.package-lock.json -nt package.json
+      - test -f node_modules/.package-lock.json && test -d node_modules/fastify && test -d node_modules/@types/node && test node_modules/.package-lock.json -nt package-lock.json && test node_modules/.package-lock.json -nt package.json
     cmds:
       - npm ci
 
@@ -96,14 +83,13 @@ tasks:
     cmds:
       - '"{{.SYSTEM_PYTHON}}" -m venv "{{.VENV_REL}}"'
       - '"{{.VENV_PYTHON}}" -m pip install -r requirements.txt'
-      - touch "{{.VENV_REQUIREMENTS_MARKER}}"
+      - '"{{.SYSTEM_PYTHON}}" -c "from pathlib import Path; Path(r\"{{.VENV_REQUIREMENTS_MARKER}}\").touch()"'
 
   dev:
     desc: Run the backend and the tts-sidecar together (Ctrl+C stops both).
-    preconditions:
-      - sh: task check:seed-data
-        msg: "Demo source data is not ready; run `task setup` (first time) or `task init` first."
-    deps: [dev:backend, dev:tts-sidecar]
+    cmds:
+      - task: check:seed-data
+      - task --parallel dev:backend dev:tts-sidecar
 
   docker:up:
     desc: Build and run the API, TTS sidecar, and one-shot Docker seed service.
@@ -121,11 +107,15 @@ tasks:
       - docker compose logs --follow
 
   clear:
-    desc: Clear local build artifacts, dependencies, venv, and runtime data.
+    desc: Clear local build artifacts, dependencies, and the TTS venv.
     cmds:
       - rm -rf node_modules
       - rm -rf "{{.SIDECAR_DIR}}/{{.VENV_REL}}"
       - rm -rf dist
+
+  reset-data:
+    desc: Delete the local SQLite database and generated seed manifest. This removes local sessions and reports.
+    cmds:
       - rm -rf data
 
   dev:backend:

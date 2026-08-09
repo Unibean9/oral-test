@@ -10,6 +10,7 @@
     "compile": "tsc",
     "test": "tsx src/test/e2e.ts",
     "ingest:demo": "tsx scripts/ingest-demo-chapters.ts",
+    "check:demo-seed": "tsx scripts/check-demo-seed.ts",
     "check:claude-cli": "tsx scripts/check-claude-cli.ts"
   },
   "dependencies": {
