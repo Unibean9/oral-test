@@ -60,6 +60,9 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
   const allowedHosts = new Set([
     `127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`,
     "127.0.0.1", "localhost", "[::1]",
+    // Public Dokploy/Traefik domain — requests arrive with this as the Host
+    // header, not a loopback address, once reverse-proxied from the internet.
+    "oral-api.bean9.net",
   ]);
 
   app.addHook("onRequest", async (request, reply) => {

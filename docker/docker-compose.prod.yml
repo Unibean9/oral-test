@@ -1,30 +1,30 @@
 # Dokploy deploy artifact. Dokploy only ever PULLS these images — it never
 # builds from source (see docker/README.md, "Never build on the VPS").
-# Image tag is controlled by IMAGE_TAG so a rollback is "change this Dokploy
-# env var back to a previous commit SHA, click Deploy" — never redeploy
-# `latest`, see docker/README.md's Rollback section.
+# Always tracks `latest` (pull_policy: always) — clicking Deploy in Dokploy
+# re-pulls whatever `main` last built. No SHA-pinned rollback lever; see
+# docker/README.md's Rollback section for the manual alternative.
 name: oral-test
 
 services:
   backend:
-    image: ${DOCKER_USER}/oral-test-backend:${IMAGE_TAG:-latest}
+    image: ${DOCKER_USERNAME}/oral-test-backend:latest
     pull_policy: always
     restart: unless-stopped
     ports:
-      - "${BACKEND_PORT:-3001}:3001"
+      - '${BACKEND_PORT:-3008}:3001'
     # `claude` is logged into a Claude Pro session as root on the VPS host
     # (not API-key auth) — the container runs as root too so it can write the
     # session's refreshed tokens back to the bind-mounted files below. This
     # deliberately gives up the non-root `USER app` set in the Dockerfile; see
     # "`claude` CLI on the VPS" in docker/README.md for the tradeoff and the
     # non-root alternative (a dedicated host user + matching container UID).
-    user: "0:0"
+    user: '0:0'
     environment:
-      PORT: "3001"
-      HOST: "0.0.0.0"
-      HOME: "/root"
-      TTS_SIDECAR_URL: "http://tts-sidecar:8765"
-      BRAINSTORM_ALLOWED_ORIGINS: "${BRAINSTORM_ALLOWED_ORIGINS}"
+      PORT: '3001'
+      HOST: '0.0.0.0'
+      HOME: '/root'
+      TTS_SIDECAR_URL: 'http://tts-sidecar:8765'
+      BRAINSTORM_ALLOWED_ORIGINS: '${BRAINSTORM_ALLOWED_ORIGINS}'
     volumes:
       - backend_data:/app/data
       # `claude` CLI binary, installed on the VPS host (`npm install -g
@@ -50,18 +50,18 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
 
   tts-sidecar:
-    image: ${DOCKER_USER}/oral-test-tts-sidecar:${IMAGE_TAG:-latest}
+    image: ${DOCKER_USERNAME}/oral-test-tts-sidecar:latest
     pull_policy: always
     restart: unless-stopped
     # No published port — reachable only from `backend` over this compose's
     # internal network. Unauthenticated endpoint by design (see
     # tts-sidecar/README.md); this is the boundary that keeps it non-public.
     environment:
-      PORT: "8765"
+      PORT: '8765'
     volumes:
       - tts_model_cache:/home/app/.cache
     deploy:
@@ -71,8 +71,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: '10m'
+        max-file: '3'
 
 volumes:
   backend_data:

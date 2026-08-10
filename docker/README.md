@@ -14,10 +14,10 @@ Dokploy needs; it never builds from source.
 
 ## GitHub Actions secrets (repo → Settings → Secrets and variables → Actions)
 
-| Secret | Used for |
-|---|---|
-| `DOCKER_USER` | DockerHub username — image push and image name (`${DOCKER_USER}/oral-test-backend`, `${DOCKER_USER}/oral-test-tts-sidecar`) |
-| `DOCKER_PASSWORD` | DockerHub **access token**, not the account password |
+| Secret            | Used for                                                                                                                            |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `DOCKER_USERNAME` | DockerHub username — image push and image name (`${DOCKER_USERNAME}/oral-test-backend`, `${DOCKER_USERNAME}/oral-test-tts-sidecar`) |
+| `DOCKER_PASSWORD` | DockerHub **access token**, not the account password                                                                                |
 
 Nothing else lives in GitHub Secrets for this pipeline — no Dokploy API token
 is needed since deploy is manual.
@@ -73,34 +73,34 @@ reason.
 
 1. Wait for the `docker-publish` workflow to finish on the commit you want to ship — confirm both `oral-test-backend` and `oral-test-tts-sidecar` pushed successfully.
 2. In the Dokploy dashboard, open this app's Compose service.
-3. Set the `IMAGE_TAG` environment variable to the commit SHA you want to run (or leave it unset / `latest` for "whatever `main` last built" — not recommended for anything you'd need to roll back from).
-4. Set/confirm the other env vars this compose file reads (see table below).
-5. Click **Deploy**. Dokploy pulls the image (`pull_policy: always`) and recreates the containers.
-6. Watch the app's `/health` endpoint (or Dokploy's own log tail) until it responds `200`.
+3. Set/confirm the env vars this compose file reads (see table below).
+4. Click **Deploy**. Dokploy pulls `latest` (`pull_policy: always`) and recreates the containers — always whatever `main` last built, no tag to set.
+5. Watch the app's `/health` endpoint (or Dokploy's own log tail) until it responds `200`.
 
 ## Dokploy app environment variables
 
 Set these directly in the Dokploy app (never in GitHub Secrets — they're not read by CI):
 
-| Variable | Required | Notes |
-|---|---|---|
-| `DOCKER_USER` | yes | Same DockerHub username as the CI secret — `docker-compose.prod.yml` interpolates `${DOCKER_USER}/oral-test-*` as the image name |
-| `IMAGE_TAG` | yes | Commit SHA to deploy. This is the rollback lever — see below |
-| `BACKEND_PORT` | no (default `3001`) | Host-side port Dokploy/Traefik routes to |
-| `BRAINSTORM_ALLOWED_ORIGINS` | yes | Comma-separated exact origins the backend's CORS guard accepts |
-| `CLAUDE_CLI_BIN` | no (default `/usr/local/bin/claude`) | Only set if the VPS's `which claude` differs from the default — see "`claude` CLI on the VPS" above |
-| `CLAUDE_CLI_LIB` | no (default `/usr/local/lib/node_modules/@anthropic-ai/claude-code`) | Only set if the VPS's `npm root -g` differs from the default |
-| `BACKEND_MEMORY_LIMIT` | no (default `512m`) | |
-| `SIDECAR_MEMORY_LIMIT` | no (default `2g`) | The TTS model is the memory-heavy part of this stack |
+| Variable                     | Required                                                             | Notes                                                                                                                                |
+| ---------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `DOCKER_USERNAME`            | yes                                                                  | Same DockerHub username as the CI secret — `docker-compose.prod.yml` interpolates `${DOCKER_USERNAME}/oral-test-*` as the image name |
+| `BACKEND_PORT`               | no (default `3008`)                                                  | Host-side port Dokploy/Traefik routes to                                                                                             |
+| `BRAINSTORM_ALLOWED_ORIGINS` | yes                                                                  | Comma-separated exact origins the backend's CORS guard accepts                                                                       |
+| `CLAUDE_CLI_BIN`             | no (default `/usr/local/bin/claude`)                                 | Only set if the VPS's `which claude` differs from the default — see "`claude` CLI on the VPS" above                                  |
+| `CLAUDE_CLI_LIB`             | no (default `/usr/local/lib/node_modules/@anthropic-ai/claude-code`) | Only set if the VPS's `npm root -g` differs from the default                                                                         |
+| `BACKEND_MEMORY_LIMIT`       | no (default `512m`)                                                  |                                                                                                                                      |
+| `SIDECAR_MEMORY_LIMIT`       | no (default `2g`)                                                    | The TTS model is the memory-heavy part of this stack                                                                                 |
 
 Domain/SSL for the backend is configured in Dokploy's own **Domains** tab, not in the compose file.
 
 ## Rollback
 
-1. In Dokploy, set `IMAGE_TAG` back to the previous known-good commit SHA (check GitHub Actions run history or the DockerHub tags list for what's available).
-2. Click **Deploy** again — same button, same API, only the tag it resolves to changed.
+`docker-compose.prod.yml` always tracks `:latest` for both images — there's
+no SHA-pinned tag to fall back to via a Dokploy env var. To roll back:
 
-Never roll back by leaving `IMAGE_TAG` on `latest` — by the time you need to roll back, `latest` already points past the bad build.
+1. Find the previous known-good commit SHA (GitHub Actions run history or the DockerHub tags list — `docker-publish.yml` still pushes both `latest` and `${{ github.sha }}`, only the compose file stopped reading the SHA one).
+2. On a machine with `docker login` access, for each image that needs rolling back: `docker pull <user>/oral-test-backend:<old_sha>`, then `docker tag <user>/oral-test-backend:<old_sha> <user>/oral-test-backend:latest` and `docker push <user>/oral-test-backend:latest` (same for `oral-test-tts-sidecar` if needed) — this makes the old build `latest` again.
+3. Click **Deploy** in Dokploy to pull it.
 
 ## Known limitations to resolve before this is internet-facing
 
