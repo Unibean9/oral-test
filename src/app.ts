@@ -14,9 +14,11 @@ import { apiError, apiOk } from "./contracts.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const PORT = Number(process.env.PORT ?? 3001);
-// Loopback remains the safe local default. Docker sets this explicitly so containers can reach
-// the API through their private network while the Compose port stays loopback-bound on the VPS.
-export const HOST = process.env.ORAL_TEST_HOST ?? "127.0.0.1";
+// Internal tool, no auth layer — must never be reachable beyond localhost on bare metal.
+// Inside a container, "localhost" is the container's own loopback, so the container's OWN
+// isolation (no published port, Docker network scoping) is what keeps this off the public
+// internet — not this value. Only override via HOST when running containerized.
+export const HOST = process.env.HOST ?? "127.0.0.1";
 
 function resolveAllowedOrigins(): string[] {
   const origins = (
@@ -43,6 +45,9 @@ function resolveAllowedHosts(): Set<string> {
   const defaults = [
     `127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`,
     "127.0.0.1", "localhost", "[::1]",
+    // Public Dokploy/Traefik domain — requests arrive with this as the Host
+    // header, not a loopback address, once reverse-proxied from the internet.
+    "oral-api.bean9.net",
   ];
   const raw = process.env.ORAL_TEST_ALLOWED_HOSTS;
   const hosts = (raw ? raw.split(",") : defaults)
@@ -68,8 +73,9 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
   // Origin header the configured allowlist has no reason to mention. Accept it implicitly.
   const selfOrigins = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]);
   const isAllowedOrigin = (origin: string) => allowedOrigins.includes(origin) || selfOrigins.has(origin);
-  // Defaults only admit loopback hosts. A deployment behind a trusted reverse proxy must opt in
-  // to its public Host value rather than accepting every host header by virtue of binding 0.0.0.0.
+  // Defaults only admit loopback hosts plus the known production reverse-proxy domain.
+  // A deployment behind a different trusted proxy must opt in via ORAL_TEST_ALLOWED_HOSTS
+  // rather than accepting every host header by virtue of binding 0.0.0.0.
   const allowedHosts = resolveAllowedHosts();
 
   app.addHook("onRequest", async (request, reply) => {

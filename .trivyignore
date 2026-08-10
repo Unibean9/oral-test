@@ -1,0 +1,8 @@
+# CVE-2026-41907 (uuid <11.1.1): fix requires bumping uuid to a major
+# version, which cascades into a breaking firebase-admin@10 downgrade
+# (see `npm audit fix --force` output). Trivy's own categorical severity
+# for this CVE is MEDIUM (GHSA source); it only surfaces under a
+# CRITICAL/HIGH gate because GitHub's CVSS-derived security_severity_level
+# (7.5) disagrees with that categorical label. Deferred until the
+# firebase-admin upgrade is scoped separately.
+CVE-2026-41907
