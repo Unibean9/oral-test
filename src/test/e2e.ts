@@ -111,6 +111,32 @@ await check('every claude invocation pins an explicit --model, and the prompt ne
   for (const args of shapes) assert.equal(args.includes('p'), false, 'no call shape may carry a bare prompt-shaped argv element');
 });
 
+await check('Claude launcher uses one safe platform-specific process shape for runtime and preflight', () => {
+  const runtimeArgs = claudeSpawn.buildClaudeArgs({ session: { mode: 'new', id: 'sid' } });
+  const posix = claudeSpawn.buildClaudeLaunch(runtimeArgs, 'linux');
+  assert.deepEqual(posix, { command: 'claude', args: runtimeArgs, shell: false });
+
+  const cmd = 'C:\\Windows\\System32\\cmd.exe';
+  const runtime = claudeSpawn.buildClaudeLaunch(runtimeArgs, 'win32', cmd);
+  const preflight = claudeSpawn.buildClaudeLaunch(['--version'], 'win32', cmd);
+  assert.equal(runtime.shell, cmd);
+  assert.equal(preflight.shell, cmd);
+  assert.deepEqual(runtime.args, []);
+  assert.deepEqual(preflight.args, []);
+  assert.match(runtime.command, /^claude\.cmd /);
+  assert.equal(preflight.command, 'claude.cmd "--version"');
+});
+
+await check('Windows Claude launcher rejects cmd metacharacters and control characters in every argv token', () => {
+  for (const unsafe of ['model&whoami', 'model|whoami', 'model>file', 'model<input', 'model^x', 'model%x%', 'model!x!', 'model(x)', 'model"x', 'model\r\nx']) {
+    assert.throws(
+      () => claudeSpawn.buildClaudeLaunch(['--model', unsafe], 'win32'),
+      /unsafe character in Claude CLI argument/,
+      `must reject ${JSON.stringify(unsafe)}`,
+    );
+  }
+});
+
 await check('F14: the shutdown path reaps a registered child, and the SIGKILL escalation actually fires', async () => {
   // A STAND-IN child, not a real turn: a real turn would spawn a live `claude` session, which is
   // what keeps this suite free of them. `node -e` with an argument array, per CLAUDE.md.

@@ -117,6 +117,31 @@ export function buildClaudeArgs(spec: {
   return args;
 }
 
+const WINDOWS_CMD_UNSAFE_ARG_RE = /[\u0000-\u001f\u007f"&|<>()^%!]/;
+
+/**
+ * Resolves the platform-specific process shape used by both the boot check and real calls.
+ *
+ * npm installs Claude Code as `claude.cmd` on Windows. `child_process.spawn('claude', ...)`
+ * cannot execute that cmd shim directly, so Windows must go through cmd.exe. Every token is
+ * quoted, and cmd metacharacters/control characters are rejected before a command string is
+ * assembled. Prompts never enter this path: runClaude still writes them only to stdin.
+ */
+export function buildClaudeLaunch(
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  windowsShell: string = process.env.ComSpec ?? 'cmd.exe',
+): { command: string; args: string[]; shell: string | false } {
+  if (platform !== 'win32') return { command: 'claude', args: [...args], shell: false };
+  for (const arg of args) {
+    if (WINDOWS_CMD_UNSAFE_ARG_RE.test(arg)) {
+      throw new Error(`unsafe character in Claude CLI argument: ${JSON.stringify(arg)}`);
+    }
+  }
+  const command = ['claude.cmd', ...args.map((arg) => `"${arg}"`)].join(' ');
+  return { command, args: [], shell: windowsShell };
+}
+
 /**
  * Test-only stand-in for the `claude` child process. Held in a module-private closure and settable
  * only through `_setSpawnForTests`, so — exactly like `testSeam.ts` — no request, header, or
@@ -179,9 +204,11 @@ function spawnClaude(args: string[], contextId: string): ChildProcess {
     stub.once('close', () => liveChildren.delete(stub));
     return stub;
   }
-  const child = spawn('claude', args, {
+  const launch = buildClaudeLaunch(args);
+  const child = spawn(launch.command, launch.args, {
     cwd: SYSTEM_ROOT,
     env: buildChildEnv(contextId),
+    shell: launch.shell,
     windowsHide: true,
     stdio: [...CHILD_STDIO],
   });
@@ -370,7 +397,8 @@ function resolveClaudeConfigDir(): string | null {
  * `npm run check:claude-cli` once instead.
  */
 export function checkClaudeCliAtBoot(): void {
-  const found = spawnSync('claude', ['--version'], { stdio: 'ignore', shell: process.platform === 'win32' });
+  const launch = buildClaudeLaunch(['--version']);
+  const found = spawnSync(launch.command, launch.args, { stdio: 'ignore', shell: launch.shell });
   if (found.error || found.status !== 0) {
     console.warn(
       '[claude-cli] `claude` was not found on PATH — install/authenticate the Claude Code CLI ' +
