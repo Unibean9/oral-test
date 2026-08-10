@@ -1,0 +1,61 @@
+# Dokploy deploy artifact. Dokploy only ever PULLS these images — it never
+# builds from source (see docker/README.md, "Never build on the VPS").
+# Image tag is controlled by IMAGE_TAG so a rollback is "change this Dokploy
+# env var back to a previous commit SHA, click Deploy" — never redeploy
+# `latest`, see docker/README.md's Rollback section.
+name: oral-test
+
+services:
+  backend:
+    image: ${DOCKER_USER}/oral-test-backend:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    environment:
+      PORT: "3001"
+      HOST: "0.0.0.0"
+      TTS_SIDECAR_URL: "http://tts-sidecar:8765"
+      BRAINSTORM_ALLOWED_ORIGINS: "${BRAINSTORM_ALLOWED_ORIGINS}"
+      # Auth for the `claude` CLI spawned by src/claude-cli/spawn.ts — set as a
+      # Dokploy app-level env var, NOT a GitHub Actions secret (out of scope
+      # for this CI pipeline). See docker/README.md.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+    volumes:
+      - backend_data:/app/data
+    depends_on:
+      - tts-sidecar
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKEND_MEMORY_LIMIT:-512m}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  tts-sidecar:
+    image: ${DOCKER_USER}/oral-test-tts-sidecar:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    # No published port — reachable only from `backend` over this compose's
+    # internal network. Unauthenticated endpoint by design (see
+    # tts-sidecar/README.md); this is the boundary that keeps it non-public.
+    environment:
+      PORT: "8765"
+    volumes:
+      - tts_model_cache:/home/app/.cache
+    deploy:
+      resources:
+        limits:
+          memory: ${SIDECAR_MEMORY_LIMIT:-2g}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  backend_data:
+  tts_model_cache:

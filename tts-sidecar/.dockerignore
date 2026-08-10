@@ -1,0 +1,5 @@
+.pyenv-tts-sidecar/
+__pycache__/
+*.pyc
+.git
+README.md

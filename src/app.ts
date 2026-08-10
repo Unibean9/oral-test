@@ -14,8 +14,11 @@ import { apiError, apiOk } from "./contracts.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const PORT = Number(process.env.PORT ?? 3001);
-// Internal tool, no auth layer — must never be reachable beyond localhost.
-export const HOST = "127.0.0.1";
+// Internal tool, no auth layer — must never be reachable beyond localhost on bare metal.
+// Inside a container, "localhost" is the container's own loopback, so the container's OWN
+// isolation (no published port, Docker network scoping) is what keeps this off the public
+// internet — not this value. Only override via HOST when running containerized.
+export const HOST = process.env.HOST ?? "127.0.0.1";
 
 function resolveAllowedOrigins(): string[] {
   const origins = (

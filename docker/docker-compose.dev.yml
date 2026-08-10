@@ -1,0 +1,47 @@
+# Local dev stack — builds from source (not the published DockerHub image).
+# Run from the repo root: docker compose -f docker/docker-compose.dev.yml up --build
+name: oral-test-dev
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+      HOST: "0.0.0.0"
+      TTS_SIDECAR_URL: "http://tts-sidecar:8765"
+      BRAINSTORM_ALLOWED_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+      # ANTHROPIC_API_KEY: set locally, or via `docker compose --env-file`.
+    volumes:
+      - backend_data:/app/data
+    depends_on:
+      tts-sidecar:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:3001/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  tts-sidecar:
+    build:
+      context: ../tts-sidecar
+      dockerfile: Dockerfile
+    # No published port: only the backend talks to this, over the compose
+    # network — matches its own "never exposed beyond localhost" design.
+    volumes:
+      - tts_model_cache:/home/app/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+
+volumes:
+  backend_data:
+  tts_model_cache:

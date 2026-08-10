@@ -1,0 +1,46 @@
+.git
+.gitignore
+.github
+
+# Docs / non-runtime
+docs/
+plans/
+*.md
+!tts-sidecar/README.md
+
+# Local env files - never bake secrets into an image layer
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Node
+node_modules/
+out/
+scripts/deck/node_modules/
+
+# Python (tts-sidecar build context excludes these too, kept here for the backend context)
+**/__pycache__/
+*.pyc
+**/.pyenv-tts*/
+
+# Runtime data - regenerated, never shipped
+data/
+*.log
+*.bak
+*.bak-wal
+*.bak-shm
+
+# Source PDFs - copyrighted, supplied locally, never shipped
+assets/*.pdf
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Claude Code project config - not part of the runtime image
+.claude/
+CLAUDE.md
+AGENTS.md
