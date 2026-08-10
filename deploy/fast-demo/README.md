@@ -25,7 +25,8 @@ docker compose --env-file deploy/fast-demo/.env -f deploy/fast-demo/compose.yaml
 docker compose --env-file deploy/fast-demo/.env -f deploy/fast-demo/compose.yaml ps -a
 ```
 
-The seed must log `5 demo chapters/378 chunks`. Verify auth without a paid model request:
+`data-init` only aligns the named SQLite volume with the configured runtime UID/GID. The seed
+must then log `5 demo chapters/378 chunks`. Verify auth without a paid model request:
 
 ```sh
 docker compose --env-file deploy/fast-demo/.env -f deploy/fast-demo/compose.yaml logs seed lock-cleanup

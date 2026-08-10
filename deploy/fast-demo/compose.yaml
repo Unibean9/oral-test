@@ -7,6 +7,19 @@ x-logs: &logs
     max-file: "3"
 
 services:
+  data-init:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: seed
+    user: "0:0"
+    command: ["sh", "-c", "chown -R ${RUNTIME_UID:?}:${RUNTIME_GID:?} /app/data"]
+    volumes:
+      - backend_data:/app/data
+    network_mode: none
+    restart: "no"
+    logging: *logs
+
   seed:
     build:
       context: ../..
@@ -19,6 +32,9 @@ services:
       - backend_data:/app/data
       - "${SOURCE_PDF_DIR:?}:/app/assets:ro"
     network_mode: none
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
     restart: "no"
     logging: *logs
 
