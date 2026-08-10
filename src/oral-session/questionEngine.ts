@@ -76,6 +76,7 @@ async function proposeAndPersist(ctx: {
   /** null on the very first (session-start) call, which may only ever propose 'advance'. */
   itemRoot: { id: string; slotId: string } | null;
 }): Promise<QuestionRow | null> {
+  const turnStartAt = Date.now();
   // A session already bound to a skill digest that no longer matches what's deployed must not
   // --resume under it — the model's actual behavior contract silently changed underneath a
   // transcript it doesn't know about. Checked first, before claiming a lease or touching the CLI:
@@ -125,23 +126,41 @@ async function proposeAndPersist(ctx: {
       reason, coverageSnapshotHash: coverageSnapshotHash(ctx.session.blueprint_id, ctx.sessionId),
       expectedLeaseGeneration: leaseGeneration,
     });
+    console.info('[oral-turn] examiner turn resolved', {
+      sessionId: ctx.sessionId, action: 'close', reason, total_ms: Date.now() - turnStartAt,
+    });
     return null;
   }
 
   const isAdvance = transition.action === 'advance';
+  // Never a real choice the model makes: exactly one legal slot exists per turn (the single
+  // `pendingSlot` offered for advance, the current item's own slot for everything else), so this
+  // is an echo field, not a decision — same trust class as `bloom_level`/`completion_reason`
+  // (see stateParser.ts's ExaminerTransition doc comment). Observed in production: the model can
+  // echo the WRONG one (e.g. `next_slot`'s id instead of `current_slot_id` on a follow-up action)
+  // while everything else about the transition — action, question, grounding — is fine; rejecting
+  // the whole turn over a metadata echo mismatch would fail a perfectly good turn for no reason.
+  // Logged (not thrown) so a rising rate is still visible without breaking the session.
   const targetSlotId = isAdvance ? ctx.pendingSlot!.slot_id : ctx.itemRoot!.slotId;
   if (transition.slot_id !== targetSlotId) {
-    throw new Error(`oral-examiner targeted slot ${transition.slot_id} but the backend allowlisted only ${targetSlotId} for action "${transition.action}"`);
+    console.warn('[oral-turn] examiner echoed slot_id mismatch, using backend-computed slot', {
+      sessionId: ctx.sessionId, action: transition.action, echoed: transition.slot_id, expected: targetSlotId,
+    });
   }
-  const { chapterId, cloId, bloomLevel } = validateExaminerTransitionAgainstSlot(transition);
+  const { chapterId, cloId, bloomLevel } = validateExaminerTransitionAgainstSlot({ ...transition, slot_id: targetSlotId });
 
-  return createQuestion({
+  const question = createQuestion({
     sessionId: ctx.sessionId, slotId: targetSlotId, chapterId, cloId, bloomLevel,
     sourceChunkIds: transition.source_chunk_ids, questionText: transition.question_text,
     promptVersion: EXAMINER_PROMPT_VERSION, modelVersion: CLAUDE_MODEL,
     action: transition.action, parentQuestionId: isAdvance ? null : ctx.itemRoot!.id,
     consumesQuota: isAdvance,
   });
+  console.info('[oral-turn] examiner turn resolved', {
+    sessionId: ctx.sessionId, questionId: question.question_id, action: transition.action,
+    total_ms: Date.now() - turnStartAt,
+  });
+  return question;
 }
 
 /**

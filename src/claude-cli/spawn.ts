@@ -329,10 +329,16 @@ export function wrapUntrusted(text: string, trailer: string): string {
 const MAX_STDOUT_BYTES = 384 * 1024;
 const MAX_STDERR_BYTES = 16 * 1024;
 
-function runClaude(args: string[], prompt: string, contextId: string, timeoutMs: number = LIMITS.claudeTimeoutMs): Promise<{ stdout: string; stderr: string; code: number | null }> {
+/** Stage timestamps around one `claude` child invocation, used to break down where turn latency
+ * actually goes (spawn/bootstrap vs. model generation vs. envelope parse) instead of guessing. */
+export interface ClaudeCallTimings { spawnStartAt: number; stdinWriteAt: number; closeAt: number }
+
+function runClaude(args: string[], prompt: string, contextId: string, timeoutMs: number = LIMITS.claudeTimeoutMs): Promise<{ stdout: string; stderr: string; code: number | null; timings: ClaudeCallTimings }> {
   return new Promise((resolve, reject) => {
+    const spawnStartAt = Date.now();
     const child = spawnClaude(args, contextId);
     child.stdin?.end(prompt, 'utf8');
+    const stdinWriteAt = Date.now();
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -354,7 +360,10 @@ function runClaude(args: string[], prompt: string, contextId: string, timeoutMs:
     // bound even though only the first 2000 chars are ever reported.
     child.stderr?.on('data', (chunk) => { if (stderr.length < MAX_STDERR_BYTES) stderr += chunk.toString('utf8').slice(0, MAX_STDERR_BYTES - stderr.length); });
     child.on('error', (err) => { clearTimeout(deadline); reject(err); });
-    child.on('close', (code) => { clearTimeout(deadline); resolve({ stdout, stderr: timedOut ? `${stderr}\nclaude deadline exceeded` : stderr, code }); });
+    child.on('close', (code) => {
+      clearTimeout(deadline);
+      resolve({ stdout, stderr: timedOut ? `${stderr}\nclaude deadline exceeded` : stderr, code, timings: { spawnStartAt, stdinWriteAt, closeAt: Date.now() } });
+    });
   });
 }
 
@@ -423,9 +432,22 @@ async function runExaminerTransitionImpl(
     session: { mode: claudeSessionId ? 'resume' : 'new', id: sessionId },
     role: 'examiner',
   });
-  const { stdout, stderr, code } = await runClaude(args, prompt, oralSessionId, timeoutMs);
+  const { stdout, stderr, code, timings } = await runClaude(args, prompt, oralSessionId, timeoutMs);
   if (code !== 0) throw new Error(`claude examiner invocation failed (exit ${code}): ${stderr.slice(0, 2000)}`);
-  return { text: parseEnvelope(stdout), claudeSessionId: sessionId };
+  const text = parseEnvelope(stdout);
+  const envelopeParseAt = Date.now();
+  // Stage breakdown for the ~10s-in-some-cases latency reports: distinguishes CLI process
+  // bootstrap/close (spawn->close, dominated by model generation on --resume) from this
+  // process's own envelope parsing, which should be near-zero.
+  console.info('[claude-cli] examiner turn timing', {
+    oralSessionId,
+    resumed: claudeSessionId !== null,
+    spawn_to_stdin_ms: timings.stdinWriteAt - timings.spawnStartAt,
+    stdin_to_close_ms: timings.closeAt - timings.stdinWriteAt,
+    close_to_parse_ms: envelopeParseAt - timings.closeAt,
+    total_ms: envelopeParseAt - timings.spawnStartAt,
+  });
+  return { text, claudeSessionId: sessionId };
 }
 
 export const runExaminerTransition = seam(runExaminerTransitionImpl);

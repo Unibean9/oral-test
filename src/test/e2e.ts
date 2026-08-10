@@ -1368,6 +1368,40 @@ await check('a resume is rejected without invoking the CLI when the bound claude
   assert.equal(calls, 0, 'a CLI version mismatch must be caught before any CLI call, not after');
 });
 
+await check('a follow-up action with a mismatched echoed slot_id is persisted under the backend-computed slot, not rejected', async () => {
+  // Regression: observed in a real live-CLI session — the examiner picked a legal follow-up
+  // action (e.g. redirect) but echoed the WRONG slot_id (next_slot's instead of the current
+  // item's own), even though slot_id is never a real choice for the model (exactly one legal
+  // value exists per turn). It must not fail an otherwise-valid turn over a metadata echo error.
+  const spawn = await import('../claude-cli/spawn.js');
+  const { teacherId } = await registerOralTeacher();
+  const { session, firstQuestion } = await seedInProgressSessionForIdempotency(teacherId, 'SV040');
+
+  (spawn.runExaminerTransition as any).setForTests(async (_oralSessionId: string, claudeSessionId: string | null, prompt: string) => {
+    const context = parseUntrustedContext(prompt);
+    assert.ok(context.allowed_actions.includes('redirect'), 'first follow-up on a fresh item must be offered');
+    return {
+      text: examinerBlock({
+        action: 'redirect',
+        slot_id: `${context.current_slot_id}-WRONG-ECHO`,
+        question_text: 'Câu hỏi follow-up với slot_id echo sai.',
+        source_chunk_ids: JSON.parse(firstQuestion.source_chunk_ids),
+        disposition: 'continue', completion_reason: null,
+      }),
+      claudeSessionId: claudeSessionId ?? 'mock-cli-session',
+    };
+  });
+  try {
+    const { submitOralTurn } = await import('../oral-session/submitTurn.js');
+    const { nextQuestion } = await submitOralTurn({ sessionId: session.session_id, questionId: firstQuestion.question_id, inputMode: 'typed', text: 'Trả lời của học sinh.' });
+    assert.ok(nextQuestion, 'the follow-up must still be persisted despite the echo mismatch');
+    assert.equal(nextQuestion!.action, 'redirect');
+    assert.equal(nextQuestion!.slot_id, firstQuestion.slot_id, 'must use the backend-computed slot, never the model\'s (possibly wrong) echoed one');
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+});
+
 await check('when close is the only legal action, the session ends deterministically without an extra examiner call', async () => {
   // Regression coverage: once a follow-up has been used on the item AND no slot is pending,
   // 'close' is the only allowed action — the outcome is already fully determined by DB state, so

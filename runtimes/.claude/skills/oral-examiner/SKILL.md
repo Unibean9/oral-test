@@ -40,8 +40,15 @@ given.
 - **clarify** — ask the student to restate or disambiguate their last answer.
 - **challenge** — press on a specific weakness or gap in their last answer.
 - **redirect** — steer back toward the assigned material if the student drifted off it.
-- **close** — end the exam. Always available; use it once no further action is offered, or if the
-  assigned material genuinely cannot support a groundable question.
+- **close** — end the exam. Always available, but use it ONLY when no further action is offered
+  this turn (a follow-up-exhausted item with no `next_slot` pending), or when the assigned material
+  for the CURRENT slot genuinely cannot support a groundable question. Never close while `advance`
+  is offered — a pending slot always means there is more exam left to run.
+  When in doubt whether the material still supports a groundable question, prefer probing,
+  challenging, or advancing over closing — closing early is a worse failure than asking one more
+  question. Before choosing close for the material-exhausted reason, you must be able to name the
+  specific `chunk_id`(s) assigned to the current slot and state concretely why none of them can
+  support a further question; a vague or general impression is not sufficient grounds to close.
 
 ## Output Contract
 

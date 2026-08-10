@@ -45,6 +45,14 @@ async function runTurnJob(job: TurnJob, ctx: {
     });
     job.succeed({ nextQuestion, completionReason: completionReasonFor(ctx.sessionId, nextQuestion) });
     if (nextQuestion) enqueueSpeechPrefetch(nextQuestion);
+    // End-to-end latency the client actually experiences for this turn (turn row committed ->
+    // examiner CLI call + persist done) — the top of the stage breakdown chain, correlatable with
+    // the '[claude-cli] examiner turn timing' / '[oral-turn] examiner turn resolved' log lines above
+    // by sessionId, and with '[tts] speech job settled' by nextQuestion's question_id.
+    console.info('[oral-turn] turn job settled', {
+      sessionId: ctx.sessionId, turnId: ctx.turnId, questionId: ctx.questionId,
+      nextQuestionId: nextQuestion?.question_id ?? null, total_ms: Date.now() - job.createdAt,
+    });
   } catch (err) {
     // No HTTP response is in flight to throw into by this point — the failure lives entirely in
     // the job, for a stream subscriber (or submitOralTurn's wrapper below) to observe. Logged here
