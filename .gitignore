@@ -23,6 +23,9 @@ out/
 data/
 *.log
 
+# Copyrighted source material is supplied out-of-band to seed jobs.
+assets/*.pdf
+
 
 # Pre-migration DB snapshots (VACUUM INTO output), written next to the live DB file
 *.bak

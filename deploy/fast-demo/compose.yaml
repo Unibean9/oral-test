@@ -1,0 +1,146 @@
+name: oral-fast-demo
+
+x-logs: &logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  seed:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: seed
+    user: "${RUNTIME_UID:?}:${RUNTIME_GID:?}"
+    environment:
+      DB_PATH: /app/data/rooms.db
+    volumes:
+      - backend_data:/app/data
+      - "${SOURCE_PDF_DIR:?}:/app/assets:ro"
+    network_mode: none
+    restart: "no"
+    logging: *logs
+
+  lock-cleanup:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: seed
+    user: "${RUNTIME_UID:?}:${RUNTIME_GID:?}"
+    command:
+      - node
+      - -e
+      - "require('node:fs').rmSync('/app/data/rooms.db.lock',{force:true}); console.log('[lock] removed exact stale lock after seed exit')"
+    volumes:
+      - backend_data:/app/data
+    network_mode: none
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    restart: "no"
+    logging: *logs
+
+  tts:
+    build:
+      context: ../../tts-sidecar
+      dockerfile: Dockerfile
+      target: runtime
+    networks: [private]
+    volumes:
+      - tts_model_cache:/home/app/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15m
+      retries: 3
+    restart: unless-stopped
+    logging: *logs
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: runtime
+    user: "${RUNTIME_UID:?}:${RUNTIME_GID:?}"
+    environment:
+      NODE_ENV: development
+      PORT: "3001"
+      HOST: 0.0.0.0
+      DB_PATH: /app/data/rooms.db
+      TTS_SIDECAR_URL: http://tts:8765
+      BRAINSTORM_ALLOWED_ORIGINS: "${DEMO_ORIGIN:?}"
+      ORAL_TEST_ALLOWED_HOSTS: "${DEMO_HOST:?}"
+      ORAL_TEST_JWT_SECRET: "${ORAL_TEST_JWT_SECRET:?}"
+      HOME: /runtime-home
+      USER: oral
+      LOGNAME: oral
+    networks: [edge, private]
+    volumes:
+      - backend_data:/app/data
+      - ../../runtimes:/app/runtimes:ro
+      - "${CLAUDE_CLI_BIN:?}:/usr/local/bin/claude:ro"
+      - "${CLAUDE_CLI_LIB:?}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro"
+      - "${CLAUDE_CONFIG_DIR:?}:/runtime-home/.claude:rw"
+      - "${CLAUDE_CONFIG_FILE:?}:/runtime-home/.claude.json:rw"
+    depends_on:
+      lock-cleanup:
+        condition: service_completed_successfully
+      tts:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3001/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    restart: unless-stopped
+    logging: *logs
+
+  frontend:
+    build:
+      context: ../../../oral-fe
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: "${DEMO_ORIGIN:?}"
+        NEXT_PUBLIC_APP_URL: "${DEMO_ORIGIN:?}"
+    networks: [edge]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5173/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    restart: unless-stopped
+    logging: *logs
+
+  caddy:
+    image: caddy:2.10-alpine
+    ports:
+      - "${NETBIRD_IP:?}:8080:8080"
+    networks: [edge]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    restart: unless-stopped
+    logging: *logs
+
+networks:
+  edge:
+  private:
+    internal: true
+
+volumes:
+  backend_data:
+  tts_model_cache:

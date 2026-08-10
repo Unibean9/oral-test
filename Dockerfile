@@ -46,6 +46,8 @@ RUN npm ci --omit=dev
 # auth) inside the image. See docker-compose.yml and docker/README.md.
 
 COPY --from=build /app/out ./out
+COPY --from=build /app/src/db/schema.sql ./out/db/schema.sql
+COPY runtimes ./runtimes
 
 RUN groupadd --system app && useradd --system --gid app --home /app app \
     && mkdir -p /app/data && chown -R app:app /app
@@ -72,10 +74,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY tsconfig.scripts.json ./
 COPY scripts ./scripts
-COPY assets ./assets
 
 RUN groupadd --system app && useradd --system --gid app --home /app app \
     && mkdir -p /app/data && chown -R app:app /app
 USER app
 
-CMD ["npm", "run", "ingest:demo", "--", "--pdf-dir", "/app/assets"]
+CMD ["sh", "-c", "npm run ingest:demo -- --pdf-dir /app/assets && npm run check:demo-seed -- --pdf-dir /app/assets --write-manifest"]

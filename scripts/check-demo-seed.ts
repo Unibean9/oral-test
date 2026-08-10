@@ -11,6 +11,15 @@ const registryPath = path.join(__dirname, 'demo-chapter-registry.json');
 const dbPath = path.resolve(process.env.DB_PATH ?? path.join(rootDir, 'data', 'rooms.db'));
 const manifestPath = path.join(path.dirname(dbPath), 'demo-seed-manifest.json');
 const writeManifest = process.argv.includes('--write-manifest');
+const EXPECTED_CHAPTERS = 5;
+const EXPECTED_CHUNKS = 378;
+
+function argValue(name: string): string | undefined {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+const pdfDir = path.resolve(argValue('--pdf-dir') ?? process.env.DEMO_PDF_DIR ?? path.join(rootDir, 'assets'));
 
 interface RegistryChapter {
   chapterId: string;
@@ -33,7 +42,7 @@ function currentManifest(chapters: RegistryChapter[]): SeedManifest {
   const sourceFiles = [...new Set(chapters.map((chapter) => chapter.sourceFile))].sort();
   const sourcePdfHashes: Record<string, string> = {};
   for (const sourceFile of sourceFiles) {
-    const pdfPath = path.join(rootDir, 'assets', sourceFile);
+    const pdfPath = path.join(pdfDir, sourceFile);
     if (!fs.existsSync(pdfPath)) throw new Error(`source PDF not found: ${pdfPath}`);
     sourcePdfHashes[sourceFile] = sha256File(pdfPath);
   }
@@ -48,6 +57,9 @@ function manifestsMatch(actual: SeedManifest, expected: SeedManifest): boolean {
 
 function main(): void {
   const { chapters } = JSON.parse(fs.readFileSync(registryPath, 'utf8')) as { chapters: RegistryChapter[] };
+  if (chapters.length !== EXPECTED_CHAPTERS) {
+    throw new Error(`expected ${EXPECTED_CHAPTERS} registry chapters, found ${chapters.length}`);
+  }
   const manifest = currentManifest(chapters);
   if (!fs.existsSync(dbPath)) throw new Error(`SQLite database not found: ${dbPath}`);
 
@@ -57,6 +69,13 @@ function main(): void {
       'SELECT chapter_id, COUNT(*) AS count, MIN(pdf_page) AS first_page, MAX(pdf_page) AS last_page FROM source_chunks GROUP BY chapter_id',
     ).all() as Array<{ chapter_id: string; count: number; first_page: number; last_page: number }>;
     const byChapter = new Map(rows.map((row) => [row.chapter_id, row]));
+    const totalChunks = rows.reduce((sum, row) => sum + row.count, 0);
+    if (rows.length !== EXPECTED_CHAPTERS || totalChunks !== EXPECTED_CHUNKS) {
+      throw new Error(
+        `expected exactly ${EXPECTED_CHAPTERS} seeded chapters/${EXPECTED_CHUNKS} chunks, ` +
+        `found ${rows.length}/${totalChunks}`,
+      );
+    }
     for (const chapter of chapters) {
       const row = byChapter.get(chapter.chapterId);
       if (!row || row.count < 1) throw new Error(`missing source chunks for ${chapter.chapterId}`);
@@ -78,7 +97,7 @@ function main(): void {
     }
   }
 
-  console.log(`[seed] verified ${chapters.length} demo chapters against ${path.basename(manifestPath)}`);
+  console.log(`[seed] verified ${chapters.length} demo chapters/${EXPECTED_CHUNKS} chunks against ${path.basename(manifestPath)}`);
 }
 
 try {

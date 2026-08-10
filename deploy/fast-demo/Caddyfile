@@ -1,0 +1,17 @@
+:8080 {
+	log {
+		output stdout
+		format console
+	}
+
+	@backend path /health /api/v1/oral-test/*
+	handle @backend {
+		reverse_proxy backend:3001 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:5173
+	}
+}
