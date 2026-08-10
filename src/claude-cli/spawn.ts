@@ -152,6 +152,11 @@ function buildChildEnv(contextId: string): NodeJS.ProcessEnv {
   } else {
     env.HOME = process.env.HOME;
     env.USERPROFILE = process.env.USERPROFILE;
+    // macOS Keychain lookups (how `claude login` state is stored there) resolve the login
+    // keychain via $USER — without it the child sees "Not logged in" even though the parent
+    // process, with the same HOME, is authenticated fine.
+    env.USER = process.env.USER;
+    env.LOGNAME = process.env.LOGNAME;
   }
   if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN) env.CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;

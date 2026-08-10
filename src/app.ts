@@ -87,6 +87,7 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
       reply
         .header("access-control-allow-origin", origin)
         .header("vary", "Origin")
+        .header("access-control-allow-credentials", "true")
         .header("access-control-allow-methods", "GET,POST,PUT,PATCH,OPTIONS")
         .header("access-control-allow-headers", "content-type,accept");
     } else if (origin && request.method !== "GET" && request.method !== "OPTIONS") {
