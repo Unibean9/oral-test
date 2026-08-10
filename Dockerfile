@@ -39,12 +39,11 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # Runtime dependency: src/claude-cli/spawn.ts shells out to the `claude` binary.
-# NOT installed here — it's bind-mounted at container start from the VPS's own
+# NOT installed here — it's bind-mounted at container start from the host's own
 # `npm install -g @anthropic-ai/claude-code` install (/usr/local/bin/claude +
 # /usr/local/lib/node_modules/@anthropic-ai/claude-code), so the host's login
 # session/credential state is reused instead of duplicating the CLI (and its
-# auth) inside the image. See docker/docker-compose.prod.yml and
-# docker/README.md.
+# auth) inside the image. See docker-compose.yml and docker/README.md.
 
 COPY --from=build /app/out ./out
 
@@ -58,3 +57,25 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -fs http://127.0.0.1:3001/health || exit 1
 
 CMD ["node", "out/server.js"]
+
+# --- Stage 3: seed (one-shot; populates chapters/questions data the backend needs to run) ----
+# Reuses `build`'s already-`npm ci`'d node_modules (tsx is a devDependency, needed to run this
+# script directly against src/ instead of the compiled runtime's out/). Must run once against the
+# same data volume the runtime stage reads before the backend can serve real oral sessions — see
+# `seed` service in docker-compose.yml.
+FROM build AS seed
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY tsconfig.scripts.json ./
+COPY scripts ./scripts
+COPY assets ./assets
+
+RUN groupadd --system app && useradd --system --gid app --home /app app \
+    && mkdir -p /app/data && chown -R app:app /app
+USER app
+
+CMD ["npm", "run", "ingest:demo", "--", "--pdf-dir", "/app/assets"]

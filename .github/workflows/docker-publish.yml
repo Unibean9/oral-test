@@ -28,10 +28,12 @@ jobs:
           - service: backend
             context: .
             dockerfile: Dockerfile
+            target: runtime
             image: oral-test-backend
           - service: tts-sidecar
             context: tts-sidecar
             dockerfile: tts-sidecar/Dockerfile
+            target: runtime
             image: oral-test-tts-sidecar
     steps:
       - name: Checkout
@@ -55,6 +57,7 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/${{ matrix.image }}:latest
@@ -66,6 +69,7 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/${{ matrix.image }}:latest

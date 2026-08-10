@@ -1,49 +1,73 @@
+# Builds both images from source. Run from the repo root: docker compose up --build
+name: oral-test
+
 services:
+  # One-shot: populates the chapters/source_chunks data the backend needs to actually run oral
+  # sessions (see Dockerfile's `seed` stage). Runs once per `up`, exits, and `backend` waits for
+  # it to complete successfully before starting — re-running is safe (idempotent upserts).
   seed:
-    image: ${ORAL_TEST_SEED_IMAGE:-oral-test-seed:local}
     build:
       context: .
+      dockerfile: Dockerfile
       target: seed
-    environment:
-      DB_PATH: /data/rooms.db
     volumes:
-      - oral-test-data:/data
+      - backend_data:/app/data
     restart: "no"
 
-  tts:
-    image: ${ORAL_TEST_TTS_IMAGE:-oral-test-tts:local}
-    build:
-      context: ./tts-sidecar
-    volumes:
-      - tts-model-cache:/models
-    restart: unless-stopped
-
-  api:
-    image: ${ORAL_TEST_IMAGE:-oral-test-api:local}
+  backend:
     build:
       context: .
-      target: api
+      dockerfile: Dockerfile
+      target: runtime
+    ports:
+      - "127.0.0.1:${ORAL_TEST_PORT:-3001}:3001"
     env_file:
       - path: .env
         required: false
     environment:
-      DB_PATH: /data/rooms.db
-      ORAL_RUNTIME_HOME: /runtime/claude
-      ORAL_TEST_HOST: 0.0.0.0
-      TTS_SIDECAR_URL: http://tts:8765
-    ports:
-      - "127.0.0.1:${ORAL_TEST_PORT:-3001}:3001"
+      PORT: "3001"
+      HOST: "0.0.0.0"
+      TTS_SIDECAR_URL: "http://tts-sidecar:8765"
     volumes:
-      - oral-test-data:/data
-      - oral-runtime:/runtime
+      - backend_data:/app/data
+      # `claude` is not baked into the image (see docker/README.md) — routes
+      # that spawn it will fail here unless you bind-mount your own install
+      # AND your own `claude login` session. Uncomment and point at your
+      # local `which claude` / `npm root -g` and home directory:
+      # - ${CLAUDE_CLI_BIN}:/usr/local/bin/claude:ro
+      # - ${CLAUDE_CLI_LIB}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      # - ${HOME}/.claude:/app/.claude
+      # - ${HOME}/.claude.json:/app/.claude.json
     depends_on:
       seed:
         condition: service_completed_successfully
-      tts:
+      tts-sidecar:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:3001/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+
+  tts-sidecar:
+    build:
+      context: ./tts-sidecar
+      dockerfile: Dockerfile
+      target: runtime
+    # No published port: only the backend talks to this, over the compose
+    # network — matches its own "never exposed beyond localhost" design.
+    volumes:
+      - tts_model_cache:/home/app/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
     restart: unless-stopped
 
 volumes:
-  oral-test-data:
-  oral-runtime:
-  tts-model-cache:
+  backend_data:
+  tts_model_cache:

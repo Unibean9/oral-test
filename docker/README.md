@@ -3,14 +3,21 @@
 ## Pipeline
 
 ```
-Push to main → GitHub Actions
-  validate: secret scan (gitleaks) → typecheck → test → SCA (Trivy fs) → SAST (Semgrep)
-  publish:  build image → container scan (Trivy) → push to DockerHub (latest + commit SHA)
+Push to main → GitHub Actions (docker-publish.yml)
+  publish: build image → push to DockerHub (latest + commit SHA)
 ```
 
-**Deploy is manual.** The workflow stops after `publish` — it never calls the
-Dokploy API. `docker/docker-compose.prod.yml` is the only deploy artifact
-Dokploy needs; it never builds from source.
+No test/typecheck/scan gate runs before publish — `npm run typecheck` and
+`npm test` must be run locally (or in a PR check you add) before merging to
+`main`. Deploy is manual: the workflow stops after `publish`, it never calls
+the Dokploy API.
+
+`docker-compose.yml` at the repo root builds all three images from source:
+`seed` (one-shot, populates the `chapters`/`source_chunks` data the backend
+needs to run real oral sessions — see the Dockerfile's `seed` stage),
+`backend`, and `tts-sidecar`. `backend` waits for `seed` to exit 0 before
+starting. It's used for local dev and is also what a from-source deploy
+(e.g. building directly on the target host) would use.
 
 ## GitHub Actions secrets (repo → Settings → Secrets and variables → Actions)
 
@@ -19,88 +26,44 @@ Dokploy needs; it never builds from source.
 | `DOCKER_USERNAME` | DockerHub username — image push and image name (`${DOCKER_USERNAME}/oral-test-backend`, `${DOCKER_USERNAME}/oral-test-tts-sidecar`) |
 | `DOCKER_PASSWORD` | DockerHub **access token**, not the account password                                                                                |
 
-Nothing else lives in GitHub Secrets for this pipeline — no Dokploy API token
-is needed since deploy is manual.
-
-## `claude` CLI on the VPS (one-time setup)
+## `claude` CLI on the deploy host (one-time setup)
 
 The image does **not** bundle the `claude` CLI that `src/claude-cli/spawn.ts`
-shells out to. Instead, `docker-compose.prod.yml` bind-mounts it in from a
-system-wide install on the VPS host itself, at the same absolute path on both
-sides so `/usr/local/bin/claude`'s symlink into
+shells out to. Bind-mount it in from a system-wide install on the host
+instead, at the same absolute path on both sides so
+`/usr/local/bin/claude`'s symlink into
 `.../lib/node_modules/@anthropic-ai/claude-code` still resolves inside the
 container without rewriting:
 
 ```bash
-# On the VPS, once, as root (or via sudo):
+# On the host, once, as root (or via sudo):
 npm install -g @anthropic-ai/claude-code
 which claude              # confirm: /usr/local/bin/claude
 npm root -g                # confirm: /usr/local/lib/node_modules
 ```
 
-If either path differs from `/usr/local/bin/claude` /
-`/usr/local/lib/node_modules/@anthropic-ai/claude-code` on your VPS (e.g. npm's
-prefix was reconfigured, or it's nvm-managed instead of system-wide), set
-`CLAUDE_CLI_BIN` and `CLAUDE_CLI_LIB` as Dokploy app env vars to override the
-defaults in `docker-compose.prod.yml` — don't edit the compose file itself for
-a host-specific path.
+Uncomment the `CLAUDE_CLI_BIN` / `CLAUDE_CLI_LIB` / `.claude` volume lines in
+`docker-compose.yml` and point them at your own local paths if they differ
+from the defaults commented there.
 
-**Auth is a Claude Pro plan login, not an API key.** Run `claude login` as
-`root` on the VPS once (interactively, over SSH — it opens a browser-auth
-flow) so the session lands at `/root/.claude/` and `/root/.claude.json`. The
-backend container then:
+**Auth is a Claude Pro plan login, not an API key.** Run `claude login` once
+(interactively — it opens a browser-auth flow) so the session lands at
+`~/.claude/` and `~/.claude.json`, then bind-mount those read-write (not
+read-only) since the CLI refreshes its session tokens in these files
+periodically — a read-only mount would let auth silently expire on the first
+refresh.
 
-- runs as `user: "0:0"` (root) instead of the Dockerfile's non-root `app`
-  user, and
-- bind-mounts `/root/.claude` and `/root/.claude.json` **read-write** (not
-  read-only, unlike the binary mounts above) — the CLI refreshes its session
-  tokens in these files periodically, and a read-only mount would let auth
-  silently expire the first time that refresh is attempted.
-
-This trades away the container's non-root isolation to reuse the host's login
-session. The alternative — create a dedicated non-root VPS user, log in as
-that user, and set the container's UID/GID to match it via `user:` — keeps
-the container non-root but adds a one-time VPS setup step; switch to it later
-if the root-container tradeoff stops being acceptable.
-
-If the CLI is ever upgraded on the VPS (`npm update -g @anthropic-ai/claude-code`),
-no image rebuild or redeploy is needed — the container picks it up on its next
-restart since the mount is live, not a copy. Re-running `claude login` (e.g.
-after a session is revoked) needs no container change either, for the same
+If the CLI is ever upgraded on the host (`npm update -g
+@anthropic-ai/claude-code`), no image rebuild is needed — the container
+picks it up on its next restart since the mount is live, not a copy.
+Re-running `claude login` needs no container change either, for the same
 reason.
 
-## Deploying (manual, every time)
+## Deploying
 
-1. Wait for the `docker-publish` workflow to finish on the commit you want to ship — confirm both `oral-test-backend` and `oral-test-tts-sidecar` pushed successfully.
-2. In the Dokploy dashboard, open this app's Compose service.
-3. Set/confirm the env vars this compose file reads (see table below).
-4. Click **Deploy**. Dokploy pulls `latest` (`pull_policy: always`) and recreates the containers — always whatever `main` last built, no tag to set.
-5. Watch the app's `/health` endpoint (or Dokploy's own log tail) until it responds `200`.
-
-## Dokploy app environment variables
-
-Set these directly in the Dokploy app (never in GitHub Secrets — they're not read by CI):
-
-| Variable                     | Required                                                             | Notes                                                                                                                                |
-| ---------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `DOCKER_USERNAME`            | yes                                                                  | Same DockerHub username as the CI secret — `docker-compose.prod.yml` interpolates `${DOCKER_USERNAME}/oral-test-*` as the image name |
-| `BACKEND_PORT`               | no (default `3008`)                                                  | Host-side port Dokploy/Traefik routes to                                                                                             |
-| `BRAINSTORM_ALLOWED_ORIGINS` | yes                                                                  | Comma-separated exact origins the backend's CORS guard accepts                                                                       |
-| `CLAUDE_CLI_BIN`             | no (default `/usr/local/bin/claude`)                                 | Only set if the VPS's `which claude` differs from the default — see "`claude` CLI on the VPS" above                                  |
-| `CLAUDE_CLI_LIB`             | no (default `/usr/local/lib/node_modules/@anthropic-ai/claude-code`) | Only set if the VPS's `npm root -g` differs from the default                                                                         |
-| `BACKEND_MEMORY_LIMIT`       | no (default `512m`)                                                  |                                                                                                                                      |
-| `SIDECAR_MEMORY_LIMIT`       | no (default `2g`)                                                    | The TTS model is the memory-heavy part of this stack                                                                                 |
-
-Domain/SSL for the backend is configured in Dokploy's own **Domains** tab, not in the compose file.
-
-## Rollback
-
-`docker-compose.prod.yml` always tracks `:latest` for both images — there's
-no SHA-pinned tag to fall back to via a Dokploy env var. To roll back:
-
-1. Find the previous known-good commit SHA (GitHub Actions run history or the DockerHub tags list — `docker-publish.yml` still pushes both `latest` and `${{ github.sha }}`, only the compose file stopped reading the SHA one).
-2. On a machine with `docker login` access, for each image that needs rolling back: `docker pull <user>/oral-test-backend:<old_sha>`, then `docker tag <user>/oral-test-backend:<old_sha> <user>/oral-test-backend:latest` and `docker push <user>/oral-test-backend:latest` (same for `oral-test-tts-sidecar` if needed) — this makes the old build `latest` again.
-3. Click **Deploy** in Dokploy to pull it.
+1. Wait for the `docker-publish` workflow to finish on the commit you want to ship — confirm both `oral-test-backend` and `oral-test-tts-sidecar` pushed successfully. (Note: `docker-publish.yml` only builds the `backend`/`tts-sidecar` targets, not `seed` — a from-source deploy via `docker compose up --build` runs `seed` as part of the compose stack; a deploy that only pulls the two published images still needs `seed` run once against the same data volume, e.g. `docker compose run --rm seed`.)
+2. On the deploy host, either pull the published images and run them, or `docker compose up --build` from this repo's `docker-compose.yml` to build from source directly (this also runs `seed`).
+3. Watch the app's `/health` endpoint until it responds `200`.
 
 ## Known limitations to resolve before this is internet-facing
 
@@ -109,13 +72,13 @@ This backend and the tts-sidecar were both written with an explicit
 Two changes were made to make containerization possible, but they do **not**
 by themselves make the app safe to expose publicly:
 
-1. **`HOST` is now env-configurable** (`src/app.ts`) so the container can bind `0.0.0.0` and be reached inside the Docker network. Container isolation (no published port for `tts-sidecar`, only the mapped `BACKEND_PORT` for `backend`) is what currently keeps this scoped — not application-level auth.
-2. **The backend's own Origin/Host guard** (`src/app.ts`'s `onRequest` hook) only allowlists loopback `Host` headers (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`). A request arriving through Dokploy's reverse proxy carries the real domain as its `Host` header, so **every external request will currently be rejected with `403 forbidden_host`** until that allowlist is extended to include the deployed domain. This is an application-code change, intentionally left out of this CI/CD scaffold — decide and make it explicitly rather than loosening a security guard as a side effect of a deploy script.
+1. **`HOST` is now env-configurable** (`src/app.ts`) so the container can bind `0.0.0.0` and be reached inside the Docker network. Container isolation (no published port for `tts-sidecar`, only the mapped backend port) is what currently keeps this scoped — not application-level auth.
+2. **The backend's own Origin/Host guard** (`src/app.ts`'s `onRequest` hook) only allowlists loopback `Host` headers (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`). A request arriving through a reverse proxy carries the real domain as its `Host` header, so **every external request will currently be rejected with `403 forbidden_host`** until that allowlist is extended to include the deployed domain (`ORAL_TEST_ALLOWED_HOSTS`). This is an application-code/config change, decide and make it explicitly rather than loosening a security guard as a side effect of a deploy script.
 
 ## Local dev
 
 ```
-docker compose -f docker/docker-compose.dev.yml up --build
+docker compose up --build
 ```
 
-Builds both images from source and runs them together with a stubbed `TTS_SIDECAR_URL` wiring already in place. `claude`-spawning routes won't work in this dev compose unless you uncomment the bind-mount lines in `docker-compose.dev.yml` and point them at your own local `claude login` session (same read-write requirement as prod — see above).
+Builds `seed`, `backend`, and `tts-sidecar` from source and runs them together (`backend` waits for `seed` to finish) with a stubbed `TTS_SIDECAR_URL` wiring already in place. `claude`-spawning routes won't work in this compose unless you uncomment the bind-mount lines in `docker-compose.yml` and point them at your own local `claude login` session (same read-write requirement as above).
