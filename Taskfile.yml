@@ -89,7 +89,11 @@ tasks:
     desc: Run the backend and the tts-sidecar together (Ctrl+C stops both).
     cmds:
       - task: check:seed-data
-      - task --parallel dev:backend dev:tts-sidecar
+      - task: dev:parallel
+
+  dev:parallel:
+    internal: true
+    deps: [dev:backend, dev:tts-sidecar]
 
   docker:up:
     desc: Build and run the API, TTS sidecar, and one-shot Docker seed service.

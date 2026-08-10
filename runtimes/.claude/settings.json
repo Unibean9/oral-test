@@ -4,8 +4,7 @@
       "Bash",
       "WebFetch",
       "WebSearch",
-      "Task",
-      "SlashCommand"
+      "Task"
     ]
   },
   "hooks": {

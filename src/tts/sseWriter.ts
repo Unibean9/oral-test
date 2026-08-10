@@ -14,6 +14,14 @@ export class SseWriter {
   private ended_ = false;
   private stalled_ = false;
   constructor(private readonly reply: FastifyReply, private readonly sessionId: string, private readonly streamId: string) {
+    // `reply.header()` (used by app.ts's onRequest hook to set the CORS headers) only writes into
+    // Fastify's internal header store — it is applied to the real socket by Fastify's normal
+    // `reply.send()` pipeline. This route never calls `send()` (it owns `reply.raw` directly for
+    // SSE), so those headers must be copied across by hand before `flushHeaders()`, or the browser
+    // sees a response with no `access-control-allow-origin` and aborts it as a CORS violation.
+    for (const [key, value] of Object.entries(reply.getHeaders())) {
+      if (value !== undefined) reply.raw.setHeader(key, value as string | string[] | number);
+    }
     reply.raw.setHeader('content-type', 'text/event-stream; charset=utf-8');
     reply.raw.setHeader('cache-control', 'no-cache, no-transform');
     reply.raw.setHeader('connection', 'keep-alive');
