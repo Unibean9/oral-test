@@ -2,6 +2,8 @@
 
 Typed-answer HTTP demo only. It binds Caddy to the VPS NetBird address and publishes no
 frontend, backend, TTS, or SQLite port. Do not use this lane on a public interface.
+TTS has outbound-only Docker egress for the first Hugging Face model download, but no host
+listener; its API remains reachable only from the backend's private network.
 
 ## One-time VPS setup
 

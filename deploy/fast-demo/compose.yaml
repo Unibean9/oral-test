@@ -62,7 +62,9 @@ services:
       context: ../../tts-sidecar
       dockerfile: Dockerfile
       target: runtime
-    networks: [private]
+    # No host port is published. `egress` exists only so the first boot can fetch the
+    # Hugging Face model into the persistent cache; API traffic stays on `private`.
+    networks: [private, egress]
     volumes:
       - tts_model_cache:/home/app/.cache
     healthcheck:
@@ -154,6 +156,7 @@ services:
 
 networks:
   edge:
+  egress:
   private:
     internal: true
 
