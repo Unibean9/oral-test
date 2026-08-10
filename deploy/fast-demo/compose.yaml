@@ -89,7 +89,7 @@ services:
       DB_PATH: /app/data/rooms.db
       TTS_SIDECAR_URL: http://tts:8765
       BRAINSTORM_ALLOWED_ORIGINS: "${DEMO_ORIGIN:?}"
-      ORAL_TEST_ALLOWED_HOSTS: "${DEMO_HOST:?}"
+      ORAL_TEST_ALLOWED_HOSTS: "${DEMO_HOST:?},127.0.0.1:3001,localhost:3001"
       ORAL_TEST_JWT_SECRET: "${ORAL_TEST_JWT_SECRET:?}"
       HOME: /runtime-home
       USER: oral
