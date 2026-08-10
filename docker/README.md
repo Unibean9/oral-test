@@ -22,6 +22,37 @@ Dokploy needs; it never builds from source.
 Nothing else lives in GitHub Secrets for this pipeline — no Dokploy API token
 is needed since deploy is manual.
 
+## `claude` CLI on the VPS (one-time setup)
+
+The image does **not** bundle the `claude` CLI that `src/claude-cli/spawn.ts`
+shells out to. Instead, `docker-compose.prod.yml` bind-mounts it in from a
+system-wide install on the VPS host itself, at the same absolute path on both
+sides so `/usr/local/bin/claude`'s symlink into
+`.../lib/node_modules/@anthropic-ai/claude-code` still resolves inside the
+container without rewriting:
+
+```bash
+# On the VPS, once, as root (or via sudo):
+npm install -g @anthropic-ai/claude-code
+which claude              # confirm: /usr/local/bin/claude
+npm root -g                # confirm: /usr/local/lib/node_modules
+```
+
+If either path differs from `/usr/local/bin/claude` /
+`/usr/local/lib/node_modules/@anthropic-ai/claude-code` on your VPS (e.g. npm's
+prefix was reconfigured, or it's nvm-managed instead of system-wide), set
+`CLAUDE_CLI_BIN` and `CLAUDE_CLI_LIB` as Dokploy app env vars to override the
+defaults in `docker-compose.prod.yml` — don't edit the compose file itself for
+a host-specific path.
+
+Auth for the CLI is separate from the binary: it reads `ANTHROPIC_API_KEY`
+from the container's own environment (set below), not from any host login
+session — the bind mount only supplies the executable, not credentials.
+
+If the CLI is ever upgraded on the VPS (`npm update -g @anthropic-ai/claude-code`),
+no image rebuild or redeploy is needed — the container picks it up on its next
+restart since the mount is live, not a copy.
+
 ## Deploying (manual, every time)
 
 1. Wait for the `docker-publish` workflow to finish on the commit you want to ship — confirm both `oral-test-backend` and `oral-test-tts-sidecar` pushed successfully.
@@ -42,6 +73,8 @@ Set these directly in the Dokploy app (never in GitHub Secrets — they're not r
 | `BACKEND_PORT` | no (default `3001`) | Host-side port Dokploy/Traefik routes to |
 | `BRAINSTORM_ALLOWED_ORIGINS` | yes | Comma-separated exact origins the backend's CORS guard accepts |
 | `ANTHROPIC_API_KEY` | yes | Auth for the `claude` CLI the backend spawns (`src/claude-cli/spawn.ts`) — out of scope for the 2 CI secrets requested; set here only |
+| `CLAUDE_CLI_BIN` | no (default `/usr/local/bin/claude`) | Only set if the VPS's `which claude` differs from the default — see "`claude` CLI on the VPS" above |
+| `CLAUDE_CLI_LIB` | no (default `/usr/local/lib/node_modules/@anthropic-ai/claude-code`) | Only set if the VPS's `npm root -g` differs from the default |
 | `BACKEND_MEMORY_LIMIT` | no (default `512m`) | |
 | `SIDECAR_MEMORY_LIMIT` | no (default `2g`) | The TTS model is the memory-heavy part of this stack |
 

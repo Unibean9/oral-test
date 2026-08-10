@@ -17,6 +17,11 @@ services:
       # ANTHROPIC_API_KEY: set locally, or via `docker compose --env-file`.
     volumes:
       - backend_data:/app/data
+      # `claude` is not baked into the image (see docker/README.md) — routes
+      # that spawn it will fail here unless you bind-mount your own install.
+      # Uncomment and point at your local `which claude` / `npm root -g`:
+      # - ${CLAUDE_CLI_BIN}:/usr/local/bin/claude:ro
+      # - ${CLAUDE_CLI_LIB}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
     depends_on:
       tts-sidecar:
         condition: service_healthy

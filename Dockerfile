@@ -39,9 +39,12 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # Runtime dependency: src/claude-cli/spawn.ts shells out to the `claude` binary.
-# Auth for it (e.g. ANTHROPIC_API_KEY) must be supplied as a container env var
-# at deploy time — it is not baked into this image. See docker/README.md.
-RUN npm install -g @anthropic-ai/claude-code
+# NOT installed here — it's bind-mounted at container start from the VPS's own
+# `npm install -g @anthropic-ai/claude-code` install (/usr/local/bin/claude +
+# /usr/local/lib/node_modules/@anthropic-ai/claude-code), so the host's login
+# session/credential state is reused instead of duplicating the CLI (and its
+# auth) inside the image. See docker/docker-compose.prod.yml and
+# docker/README.md.
 
 COPY --from=build /app/out ./out
 

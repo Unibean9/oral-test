@@ -23,6 +23,15 @@ services:
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
     volumes:
       - backend_data:/app/data
+      # `claude` CLI is installed on the VPS host (`npm install -g
+      # @anthropic-ai/claude-code`, system-wide), not baked into this image —
+      # bind-mounted read-only at the SAME absolute path it lives at on the
+      # host so /usr/local/bin/claude's symlink into
+      # .../lib/node_modules/@anthropic-ai/claude-code resolves without any
+      # rewriting. Confirm both paths on the VPS first: `which claude` and
+      # `npm root -g`. See docker/README.md.
+      - ${CLAUDE_CLI_BIN:-/usr/local/bin/claude}:/usr/local/bin/claude:ro
+      - ${CLAUDE_CLI_LIB:-/usr/local/lib/node_modules/@anthropic-ai/claude-code}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
     depends_on:
       - tts-sidecar
     deploy:
