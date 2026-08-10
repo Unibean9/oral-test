@@ -7,6 +7,7 @@ import { blueprintRoutes } from "./routes/blueprints.js";
 import { courseRoutes } from "./routes/courses.js";
 import { oralSessionRoutes } from "./routes/oralSessions.js";
 import { oralSpeechRoutes } from "./routes/oralSpeech.js";
+import { oralTurnStreamRoutes } from "./routes/oralTurnStream.js";
 import { reviewRoutes } from "./routes/reviews.js";
 import { registerAuthPlugin } from "./auth/jwt.js";
 import { apiError, apiOk } from "./contracts.js";
@@ -131,6 +132,7 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
   await app.register(courseRoutes);
   await app.register(oralSessionRoutes);
   await app.register(oralSpeechRoutes);
+  await app.register(oralTurnStreamRoutes);
   await app.register(reviewRoutes);
 
   // Envelope, like everything else. These routes carry no API_PREFIX, but that is the only respect

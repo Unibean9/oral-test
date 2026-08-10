@@ -86,6 +86,17 @@ export function listTurnsForQuestion(questionId: string): OralTurnRow[] {
   return selectTurnsByQuestion.all(questionId) as OralTurnRow[];
 }
 
+// Joined with questions so a caller holding only a turnId (e.g. the turn-stream SSE route) can
+// verify session ownership in one query instead of a separate question lookup.
+const selectTurnWithSession = db.prepare(`
+  SELECT oral_turns.*, questions.session_id AS session_id
+  FROM oral_turns JOIN questions ON questions.question_id = oral_turns.question_id
+  WHERE oral_turns.turn_id = ?
+`);
+export function getOralTurnWithSession(turnId: string): (OralTurnRow & { session_id: string }) | undefined {
+  return selectTurnWithSession.get(turnId) as (OralTurnRow & { session_id: string }) | undefined;
+}
+
 // Joins through questions so a single query returns every turn belonging to a session, without
 // the caller looping per-question — used by the review snapshot builder (Phase 5).
 const selectTurnsBySession = db.prepare(`

@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -83,6 +84,86 @@ function killEscalating(child: ChildProcess, keepAlive = false): void {
  * it; context size was not the driver.
  */
 export const CLAUDE_MODEL = process.env.BRAINSTORM_CLAUDE_MODEL ?? 'claude-sonnet-5';
+
+let cachedExaminerSkillDigest: string | null = null;
+
+/**
+ * SHA-256 of the oral-examiner skill's SKILL.md content, lazily computed on first use and cached
+ * for the process's lifetime (not at module top-level: `SYSTEM_ROOT` may not contain `runtimes/`
+ * in every deployment — e.g. a Docker image that bind-mounts it at runtime rather than baking it
+ * into the build — and this module is imported by server.ts on every boot, so a missing file here
+ * must not crash the whole process before it can even bind a port). Bound to a session's row
+ * alongside its `claude_session_id` on the first examiner call; a later resume compares this
+ * value against that bound one, and a mismatch means the skill file changed since the session
+ * started — resuming under a silently different skill version would be exactly the kind of
+ * implicit runtime assumption this binding exists to reject. Covers only SKILL.md itself, not
+ * `runtimes/.claude/settings.json`'s permission policy or the guard-room hook.
+ */
+export function examinerSkillDigest(): string {
+  if (cachedExaminerSkillDigest) return cachedExaminerSkillDigest;
+  const skillPath = path.join(SYSTEM_ROOT, '.claude/skills/oral-examiner/SKILL.md');
+  let content: string;
+  try {
+    content = fs.readFileSync(skillPath, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `oral-examiner SKILL.md not found at ${skillPath} — set BRAINSTORM_SYSTEM_ROOT to a runtime ` +
+      `root that includes it, or ensure runtimes/ is present alongside the built server`,
+    );
+  }
+  // Normalized before hashing so a Windows checkout (CRLF) and a Linux container checkout (LF) of
+  // byte-identical source content don't produce two different digests for the same skill version.
+  cachedExaminerSkillDigest = createHash('sha256').update(content.replace(/\r\n/g, '\n'), 'utf8').digest('hex');
+  return cachedExaminerSkillDigest;
+}
+
+export class ExaminerSkillVersionMismatchError extends Error {
+  constructor(sessionId: string) {
+    super(`session ${sessionId} was bound to a different oral-examiner skill version than the one currently deployed; refusing to resume`);
+    this.name = 'ExaminerSkillVersionMismatchError';
+  }
+}
+
+let cachedExaminerCliVersion: string | null = null;
+
+/**
+ * `claude --version`'s stdout, lazily resolved and cached for the process's lifetime (not at
+ * module top-level: this module is imported by server.ts on every boot, and a machine without
+ * `claude` on PATH yet — e.g. mid-provisioning — must not crash the whole process before it can
+ * bind a port; checkClaudeCliAtBoot() already warns about that case separately). Bound to a
+ * session's row alongside its `claude_session_id` on the first examiner call; a later resume
+ * compares this value against that bound one, and a mismatch means the installed CLI build
+ * changed since the session started — the wire protocol/output-format contract this runtime
+ * parses (`parseEnvelope`, `--output-format json`) is not guaranteed stable across CLI releases,
+ * so resuming under a silently different one is the same category of risk as a skill-version
+ * mismatch (see examinerSkillDigest()).
+ *
+ * Cached for the process's lifetime, same as examinerSkillDigest() — an in-place `claude` upgrade
+ * on a machine whose server process is never restarted goes undetected until the next restart.
+ * Accepted: this pin's purpose is catching a stale resume against a deploy that has since moved
+ * on, and a deploy is exactly the kind of change that already restarts this process.
+ */
+function examinerCliVersionImpl(): string {
+  if (cachedExaminerCliVersion) return cachedExaminerCliVersion;
+  const found = spawnSync('claude', ['--version'], { encoding: 'utf8', shell: process.platform === 'win32' });
+  if (found.error || found.status !== 0 || !found.stdout) {
+    throw new Error('unable to resolve the installed `claude` CLI version — is `claude` on PATH? Run `npm run check:claude-cli` to verify.');
+  }
+  cachedExaminerCliVersion = found.stdout.trim();
+  return cachedExaminerCliVersion;
+}
+
+// Wrapped as a seam (not a plain function like examinerSkillDigest()) because — unlike hashing a
+// file already checked into the repo — resolving this requires actually spawning `claude
+// --version`, which the regression suite must never depend on being installed on the runner.
+export const examinerCliVersion = seam(examinerCliVersionImpl);
+
+export class ExaminerCliVersionMismatchError extends Error {
+  constructor(sessionId: string) {
+    super(`session ${sessionId} was bound to a different claude CLI version than the one currently installed; refusing to resume`);
+    this.name = 'ExaminerCliVersionMismatchError';
+  }
+}
 
 /**
  * Every oral-assessment role this runtime spawns. Neither needs any tool at all: both skills

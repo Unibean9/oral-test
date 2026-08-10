@@ -18,6 +18,9 @@ import path from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import Database from 'better-sqlite3';
 
+// Explicit, not incidental: jwt.ts's fail-closed production check reads this, so the suite must
+// never rely on NODE_ENV simply being unset. Only set if a caller hasn't already chosen a value.
+process.env.NODE_ENV ??= 'test';
 process.env.DB_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'oral-test-db-')), 'oral-test.db');
 // Unreachable on purpose: question/turn checks earlier in this file trigger background TTS
 // prefetch before the stub sidecar (below) is installed, and must never reach a real one.
@@ -25,6 +28,13 @@ process.env.TTS_SIDECAR_URL = 'http://127.0.0.1:1';
 
 const claudeSpawn = await import('../claude-cli/spawn.js');
 const { wrapUntrusted, GROUNDING_TRAILER } = claudeSpawn;
+// Every proposeAndPersist call resolves this before touching the CLI mock — must not depend on
+// whether a real `claude` binary happens to be on this runner's PATH. Individual tests that need
+// a mismatch must restore this suite-wide default afterwards (setForTests(() => TEST_CLI_VERSION)),
+// not `setForTests(null)` — the latter re-enables a real `spawnSync('claude')` for the rest of
+// the suite.
+const TEST_CLI_VERSION = '2.0.0-test';
+(claudeSpawn.examinerCliVersion as any).setForTests(() => TEST_CLI_VERSION);
 const { withRoomLock, RoomBusyError } = await import('../claude-cli/lock.js');
 const { validateName } = await import('../contracts.js');
 const { db: sharedDb } = await import('../db/connection.js');
@@ -43,10 +53,9 @@ function check(name: string, fn: () => void | Promise<void>) {
     });
 }
 
-// Skips (not failures) without running fn. Two known, unresolved gaps as of 2026-08-10 CI
+// Skips (not failures) without running fn. One remaining unresolved gap as of 2026-08-10 CI
 // enablement: `src/test/fixtures/pre-domain-rooms.sql` and `pre-compat-rooms.sql` were never
-// committed, and migrate.ts only registers migrations through v8 while some tests still assert
-// v9 (stale expectation or an unfinished migration — undecided). Remove the guard once resolved.
+// committed. Remove the guard once resolved.
 function checkSkippable(name: string, condition: boolean, reason: string, fn: () => void | Promise<void>) {
   if (!condition) {
     console.log(`SKIP ${name} (${reason})`);
@@ -144,7 +153,7 @@ await checkSkippable(
   legacy.pragma('user_version = 1');
   runMigrations(legacy);
 
-  assert.equal(legacy.pragma('user_version', { simple: true }), 9);
+  assert.equal(legacy.pragma('user_version', { simple: true }), 12);
   const sessions = legacy.prepare('SELECT * FROM sessions ORDER BY created_at ASC').all() as any[];
   assert.equal(sessions.length, 2);
   for (const session of sessions) assert.equal(session.name, session.session_id);
@@ -179,7 +188,7 @@ await checkSkippable(
 
   // Idempotency: a second pass changes nothing and does not throw.
   runMigrations(legacy);
-  assert.equal(legacy.pragma('user_version', { simple: true }), 9);
+  assert.equal(legacy.pragma('user_version', { simple: true }), 12);
   assert.equal((legacy.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n, 2);
   legacy.close();
   },
@@ -196,7 +205,7 @@ await checkSkippable(
   v0.exec(`INSERT INTO rooms (room_id, created_at, current_phase, title, status, trace_may_be_incomplete) VALUES ('33333333-3333-3333-3333-333333333333', '2026-01-01T00:00:00.000Z', 'framing', NULL, 'active', 0)`);
   v0.pragma('user_version = 0');
   runMigrations(v0);
-  assert.equal(v0.pragma('user_version', { simple: true }), 9);
+  assert.equal(v0.pragma('user_version', { simple: true }), 12);
   const session = v0.prepare("SELECT * FROM sessions WHERE session_id = '33333333-3333-3333-3333-333333333333'").get() as any;
   assert.ok(session, 'v0 room reaches the v2 sessions table');
   assert.equal(session.engine_step, 0);
@@ -205,32 +214,24 @@ await checkSkippable(
   },
 );
 
-await checkSkippable(
-  'migrating a brand-new empty DB reaches the latest version with zero teachers and rooms rows',
-  false,
-  'migrate.ts only registers migrations through v8, this test still asserts v9 — undecided whether the test or migrate.ts is stale',
-  () => {
+await check('migrating a brand-new empty DB reaches the latest version with zero teachers and rooms rows', () => {
   const tmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'oral-migrate-')), 'fresh.db');
   const fresh = new Database(tmp);
   runMigrations(fresh);
-  assert.equal(fresh.pragma('user_version', { simple: true }), 9);
+  assert.equal(fresh.pragma('user_version', { simple: true }), 12);
   assert.equal((fresh.prepare('SELECT COUNT(*) AS n FROM teachers').get() as { n: number }).n, 0);
   assert.equal((fresh.prepare('SELECT COUNT(*) AS n FROM rooms').get() as { n: number }).n, 0);
   fresh.close();
   },
 );
 
-await checkSkippable(
-  'migration v7 seeds the oral-test taxonomy exactly once, is idempotent, and touches no legacy table',
-  false,
-  'migrate.ts only registers migrations through v8, this test still asserts v9 — undecided whether the test or migrate.ts is stale',
-  () => {
+await check('migration v7 seeds the oral-test taxonomy exactly once, is idempotent, and touches no legacy table', () => {
   const tmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'oral-migrate-')), 'fresh.db');
   const fresh = new Database(tmp);
   runMigrations(fresh);
   runMigrations(fresh); // idempotency: re-running must not error or duplicate seed rows
 
-  assert.equal(fresh.pragma('user_version', { simple: true }), 9);
+  assert.equal(fresh.pragma('user_version', { simple: true }), 12);
   assert.deepEqual(fresh.pragma('foreign_key_check'), []);
 
   const bloomCount = (fresh.prepare('SELECT COUNT(*) AS n FROM bloom_levels').get() as { n: number }).n;
@@ -322,6 +323,24 @@ await check('validateName trims, accepts diacritics, and rejects empty/over-limi
   assert.equal(validateName('a'.repeat(300)), null);
   assert.equal(validateName('bad\x00name'), null);
   assert.equal(validateName('bad\x7fname'), null);
+});
+
+await check('validateBoundedText trims, enforces the byte cap (not char count), allows newlines, and rejects other control characters without truncating', async () => {
+  const { validateBoundedText, LIMITS: limits } = await import('../contracts.js');
+  assert.equal(validateBoundedText('  Trả lời của học sinh.  ', limits.studentAnswerBytes), 'Trả lời của học sinh.');
+  assert.equal(validateBoundedText('', limits.studentAnswerBytes), null);
+  assert.equal(validateBoundedText(42, limits.studentAnswerBytes), null);
+  assert.equal(validateBoundedText('a'.repeat(limits.studentAnswerBytes + 1), limits.studentAnswerBytes), null, 'one byte over the cap must be rejected outright, never silently truncated');
+  assert.equal(validateBoundedText('a'.repeat(limits.studentAnswerBytes), limits.studentAnswerBytes), 'a'.repeat(limits.studentAnswerBytes), 'exactly at the cap must still be accepted');
+  assert.equal(validateBoundedText('bad\x00answer', limits.studentAnswerBytes), null);
+  assert.equal(validateBoundedText('Dòng một.\nDòng hai.', limits.studentAnswerBytes), 'Dòng một.\nDòng hai.', 'a multi-line typed/STT answer must not be rejected for containing a plain newline');
+  assert.equal(validateBoundedText('Dòng một.\r\nDòng hai.', limits.studentAnswerBytes), 'Dòng một.\nDòng hai.', 'CRLF must normalize to LF');
+  assert.equal(validateBoundedText('bad\x0banswer', limits.studentAnswerBytes), null, 'a non-newline control character (vertical tab) must still be rejected');
+  // 'ề' is 3 bytes in UTF-8 but 1 UTF-16 code unit — this string is under the cap by character
+  // count but over it by byte count, proving the cap is enforced on bytes, not .length.
+  const overByBytesOnly = 'ề'.repeat(Math.floor(limits.studentAnswerBytes / 3) + 1);
+  assert.ok(overByBytesOnly.length < limits.studentAnswerBytes, 'sanity: char count alone must stay under the cap');
+  assert.equal(validateBoundedText(overByBytesOnly, limits.studentAnswerBytes), null, 'a string over the byte cap must be rejected even though its character count is under the cap');
 });
 
 // ---------------------------------------------------------------------------------------
@@ -463,6 +482,57 @@ interface InjectArgs { method: string; url: string; headers?: Record<string, str
 const inject = (options: InjectArgs) =>
   app.inject({ ...options, headers: { host: LOCAL_HOST, ...(options.headers ?? {}) } } as any);
 
+/** Splits a raw SSE response body into its named events, unwrapping tts/sseWriter.ts's
+ * `{sessionId, streamId, seq, ts, data}` envelope down to just `data` — and skipping the trailing
+ * `event: done` sentinel, which tests never need to assert on directly. */
+function parseSseEvents(raw: string): Array<{ event: string; data: any }> {
+  return raw.split('\n\n').filter(Boolean).flatMap((block) => {
+    const lines = block.split('\n');
+    const eventLine = lines.find((l) => l.startsWith('event: '));
+    const dataLine = lines.find((l) => l.startsWith('data: '));
+    const event = eventLine?.slice('event: '.length) ?? 'message';
+    if (event === 'done') return [];
+    const envelope = dataLine ? JSON.parse(dataLine.slice('data: '.length)) : undefined;
+    return [{ event, data: envelope?.data }];
+  });
+}
+
+/**
+ * POST /turns now answers 202 with a `streamUrl` for the non-replay case (see submitTurn.ts's
+ * startOralTurn) instead of the old fully-synchronous 201-with-nextQuestion response. This helper
+ * drives both cases to completion and reshapes the result back into that old `{ statusCode,
+ * json(): { data: { nextQuestion, sessionCompleted, completionReason, ... } } }` shape so the bulk
+ * of this suite's turn-submission assertions didn't need to change with the transport.
+ */
+async function submitTurnViaHttp(
+  cookie: string, sessionId: string, questionId: string, inputMode: 'typed' | 'stt', text: string,
+) {
+  const res = await inject({
+    method: 'POST', url: `/api/v1/oral-test/sessions/${sessionId}/turns`, headers: { cookie },
+    payload: { questionId, inputMode, text },
+  });
+  if (res.statusCode !== 202) return res;
+  const { turnId, streamUrl } = res.json().data;
+  const streamRes = await inject({ method: 'GET', url: streamUrl, headers: { cookie } });
+  const events = parseSseEvents(streamRes.body);
+  const errored = events.find((e) => e.event === 'error');
+  if (errored) {
+    return { statusCode: 500, json: () => ({ isSuccess: false, error: errored.data }) } as unknown as Awaited<ReturnType<typeof inject>>;
+  }
+  const resolved = events.find((e) => e.event === 'turn-resolved');
+  if (!resolved) throw new Error(`turn ${turnId} stream ended without a turn-resolved or error event`);
+  return {
+    statusCode: 201,
+    json: () => ({
+      isSuccess: true,
+      data: {
+        turnId, questionId, nextQuestion: resolved.data.nextQuestion,
+        sessionCompleted: resolved.data.sessionCompleted, completionReason: resolved.data.completionReason,
+      },
+    }),
+  } as unknown as Awaited<ReturnType<typeof inject>>;
+}
+
 await check('unknown routes answer with the apiError envelope, not Fastify\'s default shape', async () => {
   const res = await inject({ method: 'GET', url: '/api/v1/oral-test/nope' });
   assert.equal(res.statusCode, 404);
@@ -475,6 +545,37 @@ await check('a request with a foreign Host header is refused (DNS rebinding guar
   const res = await app.inject({ method: 'GET', url: '/health', headers: { host: 'evil.example.com' } } as any);
   assert.equal(res.statusCode, 403);
   assert.equal(res.json().error.code, 'forbidden_host');
+});
+
+// ---------------------------------------------------------------------------------------
+// JWT secret fails closed in production instead of silently signing with the dev fallback,
+// module-loaded fresh each time via a cache-busting specifier so re-importing `jwt.js` re-runs its
+// top-level secret resolution under a different env.
+// ---------------------------------------------------------------------------------------
+await check('JWT secret resolution fails closed in production when unset or too short, accepts a strong explicit secret', async () => {
+  const originalSecret = process.env.ORAL_TEST_JWT_SECRET;
+  const originalEnv = process.env.NODE_ENV;
+  try {
+    delete process.env.ORAL_TEST_JWT_SECRET;
+    process.env.NODE_ENV = 'production';
+    await assert.rejects(
+      () => import(`../auth/jwt.js?missing-secret-${Date.now()}`),
+      /ORAL_TEST_JWT_SECRET is required/,
+    );
+
+    process.env.ORAL_TEST_JWT_SECRET = 'short';
+    await assert.rejects(
+      () => import(`../auth/jwt.js?weak-secret-${Date.now()}`),
+      /must be at least 32 bytes/,
+    );
+
+    process.env.ORAL_TEST_JWT_SECRET = 'a'.repeat(40);
+    const mod = await import(`../auth/jwt.js?strong-secret-${Date.now()}`);
+    assert.ok(mod.registerAuthPlugin, 'a sufficiently long production secret must load without throwing');
+  } finally {
+    if (originalSecret === undefined) delete process.env.ORAL_TEST_JWT_SECRET; else process.env.ORAL_TEST_JWT_SECRET = originalSecret;
+    if (originalEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = originalEnv;
+  }
 });
 
 await check('a cross-origin state-changing request is refused, while a cross-origin GET is not', async () => {
@@ -808,12 +909,103 @@ await check('POST /sessions requires auth, materializes a validated first questi
     const missingInputMode = await inject({ method: 'POST', url: `/api/v1/oral-test/sessions/${body.sessionId}/turns`, headers: { cookie }, payload: { questionId: body.question.questionId, text: 'câu trả lời' } });
     assert.equal(missingInputMode.statusCode, 422, 'input_mode is required per the API contract');
 
-    const turn = await inject({ method: 'POST', url: `/api/v1/oral-test/sessions/${body.sessionId}/turns`, headers: { cookie }, payload: { questionId: body.question.questionId, inputMode: 'typed', text: 'câu trả lời của học sinh' } });
+    const turn = await submitTurnViaHttp(cookie, body.sessionId, body.question.questionId, 'typed', 'câu trả lời của học sinh');
     assert.equal(turn.statusCode, 201);
     assert.ok(turn.json().data.nextQuestion, 'slot0 needs more than one question, so a next question must follow');
   } finally {
     (spawn.runExaminerTransition as any).setForTests(null);
   }
+});
+
+await check('POST /turns answers 202 with a streamUrl immediately, and the stream reports a heartbeat before its terminal turn-resolved event', async () => {
+  // Regression coverage for the turn-latency fix: the old contract awaited the full examiner CLI
+  // call inline and answered 201 with nextQuestion already attached, so a caller had no way to
+  // observe progress during the 10-15s the CLI call can take. The examiner mock here is delayed by
+  // one macrotask so the response really has to come back before the CLI call resolves, not just
+  // "fast enough that the ordering is unobservable in a synchronous mock".
+  const { upsertSourceChunk } = await import('../db/sourceChunks.js');
+  const { createHash } = await import('node:crypto');
+  const { listSlotsForBlueprint } = await import('../db/blueprints.js');
+  const spawn = await import('../claude-cli/spawn.js');
+  for (const chapterId of ['SWR-1', 'SWR-2', 'SWR-3']) {
+    const text = `sse-seed-${chapterId}-${uuidv4()}`;
+    upsertSourceChunk({ chapterId, pdfPage: 1, printedPage: 1, contentHash: createHash('sha256').update(text).digest('hex'), text, charStart: 0, charEnd: text.length });
+  }
+  const { cookie } = await registerOralTeacher();
+  const slot0 = listSlotsForBlueprint('bp_swr_demo_v1')[0];
+
+  (spawn.runExaminerTransition as any).setForTests(mockExaminerAlwaysAdvance);
+  let sessionId: string; let questionId: string;
+  try {
+    const start = await inject({ method: 'POST', url: '/api/v1/oral-test/sessions', headers: { cookie }, payload: { courseId: 'SWR', studentCode: 'SV900' } });
+    assert.equal(start.statusCode, 201);
+    sessionId = start.json().data.sessionId;
+    questionId = start.json().data.question.questionId;
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+
+  const { _setHeartbeatMsForTests } = await import('../routes/oralTurnStream.js');
+  _setHeartbeatMsForTests(10);
+  (spawn.runExaminerTransition as any).setForTests(async (a: string, b: string | null, prompt: string) => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return mockExaminerAlwaysAdvance(a, b, prompt);
+  });
+  try {
+    const postRes = await inject({
+      method: 'POST', url: `/api/v1/oral-test/sessions/${sessionId}/turns`, headers: { cookie },
+      payload: { questionId, inputMode: 'typed', text: 'câu trả lời của học sinh' },
+    });
+    assert.equal(postRes.statusCode, 202, 'the turn write must not wait for the examiner CLI call');
+    const { turnId, streamUrl, nextQuestion } = postRes.json().data;
+    assert.equal(nextQuestion, null, '202 response must not carry the (not-yet-known) next question');
+    assert.equal(streamUrl, `/api/v1/oral-test/sessions/${sessionId}/turns/${turnId}/stream`);
+
+    const noAuthStream = await inject({ method: 'GET', url: streamUrl });
+    assert.equal(noAuthStream.statusCode, 401, 'the stream endpoint must still require ownership auth');
+
+    const streamRes = await inject({ method: 'GET', url: streamUrl, headers: { cookie } });
+    assert.equal(streamRes.statusCode, 200);
+    const events = parseSseEvents(streamRes.body);
+    assert.ok(events.some((e) => e.event === 'examiner-thinking'), 'at least one heartbeat must fire before the delayed examiner call resolves');
+    const resolvedIndex = events.findIndex((e) => e.event === 'turn-resolved');
+    assert.ok(resolvedIndex !== -1, 'the stream must end with a turn-resolved event');
+    assert.equal(events.slice(resolvedIndex + 1).length, 0, 'turn-resolved must be the last event before the stream ends');
+    assert.ok(events[resolvedIndex].data.nextQuestion, 'slot0 needs more than one question, so a next question must follow');
+
+    // A second attach after the job has already settled must replay the same terminal event
+    // instead of erroring, so a client that reconnects mid-flight (or right after) still resolves.
+    const replayRes = await inject({ method: 'GET', url: streamUrl, headers: { cookie } });
+    assert.equal(replayRes.statusCode, 200);
+    const replayEvents = parseSseEvents(replayRes.body);
+    assert.ok(replayEvents.some((e) => e.event === 'turn-resolved'));
+
+    // Once the in-memory job is gone (retention window expired, or the process restarted) but the
+    // outcome is durably recorded in turn_submissions, a reconnect must still replay turn-resolved
+    // instead of 404ing a turn that actually succeeded.
+    const { _evictForTests } = await import('../oral-session/turnJobs.js');
+    _evictForTests(turnId);
+    const evictedRes = await inject({ method: 'GET', url: streamUrl, headers: { cookie } });
+    assert.equal(evictedRes.statusCode, 200, 'a durably-recorded result must not 404 just because the in-memory job is gone');
+    const evictedEvents = parseSseEvents(evictedRes.body);
+    const evictedResolved = evictedEvents.find((e) => e.event === 'turn-resolved');
+    assert.ok(evictedResolved, 'the turn_submissions fallback must still produce a turn-resolved event');
+    assert.equal(evictedResolved!.data.nextQuestion?.questionId, events[resolvedIndex].data.nextQuestion.questionId);
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+    _setHeartbeatMsForTests(null);
+  }
+});
+
+await check('GET /turns/:turnId/stream 404s for a turn id that was never tracked', async () => {
+  const { cookie, teacherId } = await registerOralTeacher();
+  const { session } = await seedInProgressSessionForIdempotency(teacherId, 'SV901');
+  const res = await inject({
+    method: 'GET',
+    url: `/api/v1/oral-test/sessions/${session.session_id}/turns/00000000-0000-0000-0000-000000000000/stream`,
+    headers: { cookie },
+  });
+  assert.equal(res.statusCode, 404);
 });
 
 await check('a citation outside the assigned chunk set is rejected, never persisted as a question', async () => {
@@ -952,6 +1144,11 @@ await check('the examiner CLI session id is created once and reused via --resume
 
   const afterFirstCall = getOralSession(session.session_id);
   assert.ok(afterFirstCall?.claude_session_id, 'the first (new) examiner call must persist a claude_session_id');
+  // Proves bindClaudeSession's positional args (claudeSessionId, examinerSkillDigest,
+  // examinerCliVersion) land in the right columns rather than each column merely being
+  // non-null — a transposed digest/version pair would satisfy a plain truthiness check.
+  assert.match(afterFirstCall!.examiner_skill_digest ?? '', /^[0-9a-f]{64}$/, 'examiner_skill_digest must be bound as the SHA-256 hex digest, not the CLI version string');
+  assert.equal(afterFirstCall!.examiner_cli_version, TEST_CLI_VERSION, 'examiner_cli_version must be bound as the (test-seamed) CLI version string, not the digest');
 
   const seenClaudeSessionIds: Array<string | null> = [];
   (spawn.runExaminerTransition as any).setForTests(async (_oralSessionId: string, claudeSessionId: string | null, prompt: string) => {
@@ -1067,6 +1264,108 @@ await check('a retry after the examiner call itself failed reuses the already-co
     (spawn.runExaminerTransition as any).setForTests(null);
   }
   assert.equal(listTurnsForQuestion(firstQuestion.question_id).length, 1, 'no duplicate turn must exist after a successful retry');
+});
+
+await check('a stale lease generation fences out a commit after a newer request already claimed a fresh one', async () => {
+  const spawn = await import('../claude-cli/spawn.js');
+  const { claimSessionLease } = await import('../db/oralSessions.js');
+  const { listQuestionsForSession } = await import('../db/questions.js');
+  const { teacherId } = await registerOralTeacher();
+  const { session, firstQuestion } = await seedInProgressSessionForIdempotency(teacherId, 'SV036');
+  const questionsBefore = listQuestionsForSession(session.session_id).length;
+
+  (spawn.runExaminerTransition as any).setForTests(async (a: string, b: string | null, prompt: string) => {
+    // Simulates a newer request claiming a fresh lease while this call is still "in flight" (the
+    // real-world case: this process crashed after claiming and a restarted process's request
+    // resumed the same session) — this attempt's eventual result must be fenced out, never
+    // committed, once it tries to write with its now-superseded generation.
+    claimSessionLease(session.session_id);
+    return mockExaminerAlwaysAdvance(a, b, prompt);
+  });
+  const { askNextQuestionLocked } = await import('../oral-session/questionEngine.js');
+  try {
+    await assert.rejects(
+      () => askNextQuestionLocked(session.session_id, firstQuestion),
+      (err: any) => { assert.equal(err.name, 'SessionLeaseFencedError'); return true; },
+    );
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+  assert.equal(listQuestionsForSession(session.session_id).length, questionsBefore, 'a fenced attempt must not persist a question row');
+});
+
+await check('a session ended (e.g. via the manual /end route) while an examiner call is in flight fences that call\'s result, even though /end never claims a lease itself', async () => {
+  const spawn = await import('../claude-cli/spawn.js');
+  const { endOralSession } = await import('../db/oralSessions.js');
+  const { listQuestionsForSession } = await import('../db/questions.js');
+  const { teacherId } = await registerOralTeacher();
+  const { session, firstQuestion } = await seedInProgressSessionForIdempotency(teacherId, 'SV037');
+  const questionsBefore = listQuestionsForSession(session.session_id).length;
+
+  (spawn.runExaminerTransition as any).setForTests(async (a: string, b: string | null, prompt: string) => {
+    // The manual /end route's endOralSession() call takes no lease and holds no room lock, so it
+    // can complete while this call is mid-flight — the fence must still catch it via the status
+    // check, not just the generation check.
+    endOralSession(session.session_id);
+    return mockExaminerAlwaysAdvance(a, b, prompt);
+  });
+  const { askNextQuestionLocked } = await import('../oral-session/questionEngine.js');
+  try {
+    await assert.rejects(
+      () => askNextQuestionLocked(session.session_id, firstQuestion),
+      (err: any) => { assert.equal(err.name, 'SessionLeaseFencedError'); return true; },
+    );
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+  assert.equal(listQuestionsForSession(session.session_id).length, questionsBefore, 'a fenced attempt must not persist a question row into an already-ended session');
+});
+
+await check('a resume is rejected without invoking the CLI when the bound examiner skill digest no longer matches the deployed skill', async () => {
+  const spawn = await import('../claude-cli/spawn.js');
+  const { teacherId } = await registerOralTeacher();
+  const { session, firstQuestion } = await seedInProgressSessionForIdempotency(teacherId, 'SV038');
+
+  // seedInProgressSessionForIdempotency's first (new-session) call already bound the real,
+  // currently-deployed digest — simulate the skill file having changed since by overwriting it
+  // directly, the same effect a real SKILL.md edit between the first and this call would have.
+  sharedDb.prepare('UPDATE assessment_sessions SET examiner_skill_digest = ? WHERE session_id = ?')
+    .run('0'.repeat(64), session.session_id);
+
+  let calls = 0;
+  (spawn.runExaminerTransition as any).setForTests(async (a: string, b: string | null, prompt: string) => { calls += 1; return mockExaminerAlwaysAdvance(a, b, prompt); });
+  const { askNextQuestionLocked } = await import('../oral-session/questionEngine.js');
+  try {
+    await assert.rejects(
+      () => askNextQuestionLocked(session.session_id, firstQuestion),
+      (err: any) => { assert.equal(err.name, 'ExaminerSkillVersionMismatchError'); return true; },
+    );
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+  assert.equal(calls, 0, 'a digest mismatch must be caught before any CLI call, not after');
+});
+
+await check('a resume is rejected without invoking the CLI when the bound claude CLI version no longer matches the installed one', async () => {
+  const spawn = await import('../claude-cli/spawn.js');
+  const { teacherId } = await registerOralTeacher();
+  const { session, firstQuestion } = await seedInProgressSessionForIdempotency(teacherId, 'SV039');
+
+  sharedDb.prepare('UPDATE assessment_sessions SET examiner_cli_version = ? WHERE session_id = ?')
+    .run('0.0.0-stale', session.session_id);
+
+  let calls = 0;
+  (spawn.runExaminerTransition as any).setForTests(async (a: string, b: string | null, prompt: string) => { calls += 1; return mockExaminerAlwaysAdvance(a, b, prompt); });
+  const { askNextQuestionLocked } = await import('../oral-session/questionEngine.js');
+  try {
+    await assert.rejects(
+      () => askNextQuestionLocked(session.session_id, firstQuestion),
+      (err: any) => { assert.equal(err.name, 'ExaminerCliVersionMismatchError'); return true; },
+    );
+  } finally {
+    (spawn.runExaminerTransition as any).setForTests(null);
+  }
+  assert.equal(calls, 0, 'a CLI version mismatch must be caught before any CLI call, not after');
 });
 
 await check('when close is the only legal action, the session ends deterministically without an extra examiner call', async () => {
@@ -1283,13 +1582,13 @@ async function runFullCoursePackE2E(courseId: string, blueprintId: string, chapt
     questionId = start.json().data.question.questionId;
 
     for (let asked = 1; asked < totalQuestions; asked += 1) {
-      const turn = await inject({ method: 'POST', url: `/api/v1/oral-test/sessions/${sessionId}/turns`, headers: { cookie }, payload: { questionId, inputMode: 'typed', text: `Trả lời số ${asked} của học sinh.` } });
+      const turn = await submitTurnViaHttp(cookie, sessionId, questionId, 'typed', `Trả lời số ${asked} của học sinh.`);
       assert.equal(turn.statusCode, 201);
       assert.ok(turn.json().data.nextQuestion, `question ${asked + 1} of ${totalQuestions} must follow`);
       questionId = turn.json().data.nextQuestion.questionId;
     }
     // The last turn completes the session: no next question, status flips to completed.
-    const lastTurn = await inject({ method: 'POST', url: `/api/v1/oral-test/sessions/${sessionId}/turns`, headers: { cookie }, payload: { questionId, inputMode: 'typed', text: 'Trả lời cuối cùng của học sinh.' } });
+    const lastTurn = await submitTurnViaHttp(cookie, sessionId, questionId, 'typed', 'Trả lời cuối cùng của học sinh.');
     assert.equal(lastTurn.statusCode, 201);
     assert.equal(lastTurn.json().data.nextQuestion, null, 'the final slot must not produce another question');
     assert.equal(lastTurn.json().data.completionReason, 'coverage_verified', 'every slot answered must verify coverage, not an early end');

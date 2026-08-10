@@ -1,10 +1,16 @@
 import { createHash } from 'node:crypto';
-import { CLAUDE_MODEL, runExaminerTransition } from '../claude-cli/spawn.js';
+import {
+  CLAUDE_MODEL, examinerSkillDigest, ExaminerSkillVersionMismatchError,
+  examinerCliVersion, ExaminerCliVersionMismatchError, runExaminerTransition,
+} from '../claude-cli/spawn.js';
 import { withRoomLock } from '../claude-cli/lock.js';
 import { getBlueprint, listSlotsForBlueprint, type BlueprintSlotRow } from '../db/blueprints.js';
 import { listChunksForChapter, type SourceChunkRow } from '../db/sourceChunks.js';
 import { createQuestion, listQuestionsForSession, listTurnsForQuestion, type QuestionRow } from '../db/questions.js';
-import { getOralSession, endOralSession, setClaudeSessionId, type AssessmentSessionRow } from '../db/oralSessions.js';
+import {
+  getOralSession, endOralSession, bindClaudeSession, claimSessionLease, assertLeaseCurrent,
+  SessionLeaseFencedError, type AssessmentSessionRow,
+} from '../db/oralSessions.js';
 import { buildExaminerStartPrompt, buildExaminerResumePrompt } from './promptBuilder.js';
 import {
   parseExaminerStateBlock, validateExaminerTransitionAgainstSlot, ExaminerStateParseError,
@@ -70,8 +76,36 @@ async function proposeAndPersist(ctx: {
   /** null on the very first (session-start) call, which may only ever propose 'advance'. */
   itemRoot: { id: string; slotId: string } | null;
 }): Promise<QuestionRow | null> {
+  // A session already bound to a skill digest that no longer matches what's deployed must not
+  // --resume under it — the model's actual behavior contract silently changed underneath a
+  // transcript it doesn't know about. Checked first, before claiming a lease or touching the CLI:
+  // a mismatch needs no lease to detect (it's decided entirely by the already-loaded `ctx.session`
+  // snapshot) and must never cost a DB write or a CLI call.
+  const currentSkillDigest = examinerSkillDigest();
+  if (ctx.session.examiner_skill_digest && ctx.session.examiner_skill_digest !== currentSkillDigest) {
+    throw new ExaminerSkillVersionMismatchError(ctx.sessionId);
+  }
+  // Same rationale, for the installed CLI build's wire protocol rather than the skill content —
+  // see examinerCliVersion()'s doc comment.
+  const currentCliVersion = examinerCliVersion();
+  if (ctx.session.examiner_cli_version && ctx.session.examiner_cli_version !== currentCliVersion) {
+    throw new ExaminerCliVersionMismatchError(ctx.sessionId);
+  }
+
+  // Claimed before the (possibly long-running) CLI call so a status change or a newer claim that
+  // happens while this call is in flight fences out this attempt's result rather than letting a
+  // stale write land — see claimSessionLease's doc comment. A session that's already left
+  // in_progress by claim time has nothing to claim; treat that exactly like a fenced attempt and
+  // never invoke the CLI for it.
+  const leaseGeneration = claimSessionLease(ctx.sessionId);
+  if (leaseGeneration === null) throw new SessionLeaseFencedError(ctx.sessionId);
+
   const { text, claudeSessionId } = await runExaminerTransition(ctx.sessionId, ctx.session.claude_session_id, ctx.prompt);
-  if (!ctx.session.claude_session_id) setClaudeSessionId(ctx.sessionId, claudeSessionId);
+  // Checked immediately on resume from the await, before any write follows from this call's
+  // result — including binding claude_session_id, which a fenced attempt must not persist either
+  // (it would point a later --resume at a transcript missing whatever the winning attempt wrote).
+  assertLeaseCurrent(ctx.sessionId, leaseGeneration);
+  if (!ctx.session.claude_session_id) bindClaudeSession(ctx.sessionId, claudeSessionId, currentSkillDigest, currentCliVersion);
 
   let transition: ExaminerTransition;
   try {
@@ -85,9 +119,12 @@ async function proposeAndPersist(ctx: {
 
   if (transition.action === 'close') {
     // The agent's own completion_reason is advisory only — coverage truth is DB-derived, never
-    // trusted from the model, per this plan's non-negotiable invariant.
+    // trusted from the model.
     const reason = ctx.pendingSlot ? 'ended_early' : 'coverage_verified';
-    endOralSession(ctx.sessionId, { reason, coverageSnapshotHash: coverageSnapshotHash(ctx.session.blueprint_id, ctx.sessionId) });
+    endOralSession(ctx.sessionId, {
+      reason, coverageSnapshotHash: coverageSnapshotHash(ctx.session.blueprint_id, ctx.sessionId),
+      expectedLeaseGeneration: leaseGeneration,
+    });
     return null;
   }
 

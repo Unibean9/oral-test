@@ -1,19 +1,16 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { apiOk, apiError } from '../contracts.js';
+import { apiOk, apiError, LIMITS, validateBoundedText } from '../contracts.js';
 import { ownershipGuard } from '../auth/ownershipGuard.js';
-import { RoomBusyError } from '../claude-cli/lock.js';
 import { getOralSession, resolveOralSessionOwner, listOralSessionsForTeacher, endOralSession } from '../db/oralSessions.js';
 import { listQuestionsForSession, getQuestion } from '../db/questions.js';
-import { startOralTestSession, CourseHasNoBlueprintsError } from '../oral-session/startSession.js';
-import {
-  submitOralTurn, QuestionNotFoundError, QuestionNotInSessionError, SessionNotInProgressError, SubmissionConflictError,
-} from '../oral-session/submitTurn.js';
-import { IllegalExaminerActionError } from '../oral-session/questionEngine.js';
+import { startOralTestSession } from '../oral-session/startSession.js';
+import { startOralTurn } from '../oral-session/submitTurn.js';
+import { mapEngineError } from '../oral-session/engineErrors.js';
 
 export const ORAL_TEST_PREFIX = '/api/v1/oral-test';
 const INPUT_MODES = ['stt', 'typed'] as const;
 
-function questionDto(q: ReturnType<typeof getQuestion> | null) {
+export function questionDto(q: ReturnType<typeof getQuestion> | null) {
   if (!q) return null;
   return {
     questionId: q.question_id, sessionId: q.session_id, slotId: q.slot_id, chapterId: q.chapter_id,
@@ -31,14 +28,10 @@ function sessionOwner(req: FastifyRequest): string | undefined {
 /** Maps the oral-session engine's typed errors to the right HTTP status — every other error
  * escapes to app.ts's setErrorHandler as a generic 500. */
 function handleEngineError(err: unknown, reply: any): boolean {
-  if (err instanceof CourseHasNoBlueprintsError) { reply.code(404).send(apiError('course_not_found', err.message)); return true; }
-  if (err instanceof QuestionNotFoundError) { reply.code(404).send(apiError('question_not_found', err.message)); return true; }
-  if (err instanceof QuestionNotInSessionError) { reply.code(422).send(apiError('question_not_in_session', err.message)); return true; }
-  if (err instanceof SessionNotInProgressError) { reply.code(409).send(apiError('session_not_in_progress', err.message)); return true; }
-  if (err instanceof SubmissionConflictError) { reply.code(409).send(apiError('submission_conflict', err.message)); return true; }
-  if (err instanceof IllegalExaminerActionError) { reply.code(502).send(apiError('examiner_illegal_action', err.message)); return true; }
-  if (err instanceof RoomBusyError) { reply.code(409).send(apiError('session_busy', err.message)); return true; }
-  return false;
+  const mapped = mapEngineError(err);
+  if (!mapped) return false;
+  reply.code(mapped.status).send(apiError(mapped.code, (err as Error).message, mapped.recoverable));
+  return true;
 }
 
 export async function oralSessionRoutes(app: FastifyInstance) {
@@ -92,21 +85,37 @@ export async function oralSessionRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const body = req.body ?? {};
       const questionId = typeof body.questionId === 'string' ? body.questionId : '';
-      const text = typeof body.text === 'string' ? body.text.trim() : '';
       const inputMode = body.inputMode;
       if (!questionId) return reply.code(422).send(apiError('invalid_question_id', 'questionId is required'));
       if (!inputMode || !INPUT_MODES.includes(inputMode as (typeof INPUT_MODES)[number])) {
         return reply.code(422).send(apiError('invalid_input_mode', 'inputMode must be "stt" or "typed"'));
       }
-      if (!text) return reply.code(422).send(apiError('invalid_text', 'text is required'));
+      // Bounded/normalized before the request fingerprint is computed or any DB/CLI work starts —
+      // an oversized or control-character-bearing answer is rejected outright, never truncated.
+      const text = validateBoundedText(body.text, LIMITS.studentAnswerBytes);
+      if (!text) return reply.code(422).send(apiError('invalid_text', `text is required and must be a non-empty string up to ${LIMITS.studentAnswerBytes} bytes with no control characters`));
       try {
-        const { turn, nextQuestion } = await submitOralTurn({
+        const started = await startOralTurn({
           sessionId: req.params.sessionId, questionId, inputMode: inputMode as 'stt' | 'typed', text,
         });
-        const completionReason = nextQuestion === null ? getOralSession(req.params.sessionId)?.completion_reason ?? null : null;
-        return reply.code(201).send(apiOk({
-          turnId: turn.turn_id, questionId: turn.question_id, createdAt: turn.created_at,
-          nextQuestion: questionDto(nextQuestion), sessionCompleted: nextQuestion === null, completionReason,
+        if (started.kind === 'immediate') {
+          // Already resolved without touching the CLI (idempotent replay) — same shape and status
+          // as the old fully-synchronous response, so a client that never adopts the stream still
+          // works for retries.
+          return reply.code(201).send(apiOk({
+            turnId: started.turn.turn_id, questionId: started.turn.question_id, createdAt: started.turn.created_at,
+            nextQuestion: questionDto(started.nextQuestion), sessionCompleted: started.nextQuestion === null,
+            completionReason: started.completionReason, streamUrl: null,
+          }));
+        }
+        // The examiner's next-move CLI call is running in the background — the turn itself is
+        // already durably committed, so this returns immediately instead of the client sitting on
+        // one silent await for the full 10-15s CLI round trip. `streamUrl` is the SSE endpoint that
+        // reports its progress and terminal result.
+        return reply.code(202).send(apiOk({
+          turnId: started.turn.turn_id, questionId: started.turn.question_id, createdAt: started.turn.created_at,
+          nextQuestion: null, sessionCompleted: null, completionReason: null,
+          streamUrl: `${ORAL_TEST_PREFIX}/sessions/${req.params.sessionId}/turns/${started.turn.turn_id}/stream`,
         }));
       } catch (err) {
         if (handleEngineError(err, reply)) return;

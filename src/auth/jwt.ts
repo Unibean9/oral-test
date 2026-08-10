@@ -11,11 +11,27 @@ export const TOKEN_TTL_SECONDS = 2 * 60 * 60;
 
 // Loopback-only pilot tool (see app.ts's HOST comment) with a handful of teacher accounts — a
 // fixed dev-fallback secret is accepted here so `npm test`/`npm run dev` work with zero setup,
-// but a real deployment must set this explicitly.
-const JWT_SECRET = process.env.ORAL_TEST_JWT_SECRET ?? 'dev-only-oral-test-secret-do-not-use-in-production';
-if (!process.env.ORAL_TEST_JWT_SECRET) {
-  console.warn('[auth] ORAL_TEST_JWT_SECRET not set; using an insecure dev-only fallback. Set it before any non-local deployment.');
+// but a real deployment must set this explicitly. `NODE_ENV=production` fails closed instead of
+// silently signing tokens with a secret every reader of this file already knows.
+const MIN_JWT_SECRET_BYTES = 32; // 256 bits — HMAC-SHA256's own key-strength floor.
+const DEV_FALLBACK_JWT_SECRET = 'dev-only-oral-test-secret-do-not-use-in-production';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+function resolveJwtSecret(): string {
+  const configured = process.env.ORAL_TEST_JWT_SECRET;
+  if (!configured) {
+    if (IS_PRODUCTION) throw new Error('[auth] ORAL_TEST_JWT_SECRET is required when NODE_ENV=production; refusing to start with the dev fallback secret.');
+    console.warn('[auth] ORAL_TEST_JWT_SECRET not set; using an insecure dev-only fallback. Set it before any non-local deployment.');
+    return DEV_FALLBACK_JWT_SECRET;
+  }
+  if (Buffer.byteLength(configured, 'utf8') < MIN_JWT_SECRET_BYTES) {
+    if (IS_PRODUCTION) throw new Error(`[auth] ORAL_TEST_JWT_SECRET must be at least ${MIN_JWT_SECRET_BYTES} bytes when NODE_ENV=production.`);
+    console.warn(`[auth] ORAL_TEST_JWT_SECRET is shorter than the recommended ${MIN_JWT_SECRET_BYTES} bytes; acceptable only outside production.`);
+  }
+  return configured;
 }
+
+const JWT_SECRET = resolveJwtSecret();
 
 export interface TeacherJwtPayload {
   teacherId: string;

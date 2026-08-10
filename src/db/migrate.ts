@@ -570,6 +570,36 @@ function migrationV9(db: Database.Database): void {
   `);
 }
 
+/**
+ * `lease_generation` is bumped every time a caller claims the right to invoke the examiner CLI and
+ * commit its result for a session. A commit is only applied if the session is still `in_progress`
+ * under the exact generation it was claimed under — a request whose generation was superseded, or
+ * whose session left `in_progress` while the CLI call was in flight, is fenced and its result
+ * discarded instead of written. See src/db/oralSessions.ts's claimSessionLease/assertLeaseCurrent.
+ */
+function migrationV10(db: Database.Database): void {
+  db.exec("ALTER TABLE assessment_sessions ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0");
+}
+
+/**
+ * `examiner_skill_digest` is bound alongside `claude_session_id` on a session's first examiner
+ * call and never overwritten after — see src/claude-cli/spawn.ts's examinerSkillDigest() for what
+ * a later mismatch on resume means and why it's rejected rather than silently allowed.
+ */
+function migrationV11(db: Database.Database): void {
+  db.exec("ALTER TABLE assessment_sessions ADD COLUMN examiner_skill_digest TEXT");
+}
+
+/**
+ * `examiner_cli_version` is bound alongside `claude_session_id`/`examiner_skill_digest` on a
+ * session's first examiner call and never overwritten after — see
+ * src/claude-cli/spawn.ts's examinerCliVersion() for what a later mismatch on resume means and
+ * why it's rejected rather than silently allowed.
+ */
+function migrationV12(db: Database.Database): void {
+  db.exec("ALTER TABLE assessment_sessions ADD COLUMN examiner_cli_version TEXT");
+}
+
 const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) => void; nonAdditive?: boolean }> = [
   { version: 1, up: migrationV1 },
   { version: 2, up: migrationV2, nonAdditive: true },
@@ -580,6 +610,9 @@ const MIGRATIONS: Array<{ version: number; up: (db: Database.Database) => void; 
   { version: 7, up: migrationV7 },
   { version: 8, up: migrationV8 },
   { version: 9, up: migrationV9 },
+  { version: 10, up: migrationV10 },
+  { version: 11, up: migrationV11 },
+  { version: 12, up: migrationV12 },
 ];
 
 export function runMigrations(db: Database.Database): void {
