@@ -14,14 +14,16 @@ services:
       HOST: "0.0.0.0"
       TTS_SIDECAR_URL: "http://tts-sidecar:8765"
       BRAINSTORM_ALLOWED_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
-      # ANTHROPIC_API_KEY: set locally, or via `docker compose --env-file`.
     volumes:
       - backend_data:/app/data
       # `claude` is not baked into the image (see docker/README.md) — routes
-      # that spawn it will fail here unless you bind-mount your own install.
-      # Uncomment and point at your local `which claude` / `npm root -g`:
+      # that spawn it will fail here unless you bind-mount your own install
+      # AND your own `claude login` session. Uncomment and point at your
+      # local `which claude` / `npm root -g` and home directory:
       # - ${CLAUDE_CLI_BIN}:/usr/local/bin/claude:ro
       # - ${CLAUDE_CLI_LIB}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      # - ${HOME}/.claude:/app/.claude
+      # - ${HOME}/.claude.json:/app/.claude.json
     depends_on:
       tts-sidecar:
         condition: service_healthy

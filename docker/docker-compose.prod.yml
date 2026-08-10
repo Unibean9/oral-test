@@ -12,18 +12,22 @@ services:
     restart: unless-stopped
     ports:
       - "${BACKEND_PORT:-3001}:3001"
+    # `claude` is logged into a Claude Pro session as root on the VPS host
+    # (not API-key auth) — the container runs as root too so it can write the
+    # session's refreshed tokens back to the bind-mounted files below. This
+    # deliberately gives up the non-root `USER app` set in the Dockerfile; see
+    # "`claude` CLI on the VPS" in docker/README.md for the tradeoff and the
+    # non-root alternative (a dedicated host user + matching container UID).
+    user: "0:0"
     environment:
       PORT: "3001"
       HOST: "0.0.0.0"
+      HOME: "/root"
       TTS_SIDECAR_URL: "http://tts-sidecar:8765"
       BRAINSTORM_ALLOWED_ORIGINS: "${BRAINSTORM_ALLOWED_ORIGINS}"
-      # Auth for the `claude` CLI spawned by src/claude-cli/spawn.ts — set as a
-      # Dokploy app-level env var, NOT a GitHub Actions secret (out of scope
-      # for this CI pipeline). See docker/README.md.
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
     volumes:
       - backend_data:/app/data
-      # `claude` CLI is installed on the VPS host (`npm install -g
+      # `claude` CLI binary, installed on the VPS host (`npm install -g
       # @anthropic-ai/claude-code`, system-wide), not baked into this image —
       # bind-mounted read-only at the SAME absolute path it lives at on the
       # host so /usr/local/bin/claude's symlink into
@@ -32,6 +36,11 @@ services:
       # `npm root -g`. See docker/README.md.
       - ${CLAUDE_CLI_BIN:-/usr/local/bin/claude}:/usr/local/bin/claude:ro
       - ${CLAUDE_CLI_LIB:-/usr/local/lib/node_modules/@anthropic-ai/claude-code}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      # `claude login` session (Claude Pro plan, not an API key) — read-write:
+      # the CLI refreshes tokens in these files as the session ages, a
+      # read-only mount would silently break auth after the first refresh.
+      - /root/.claude:/root/.claude
+      - /root/.claude.json:/root/.claude.json
     depends_on:
       - tts-sidecar
     deploy:

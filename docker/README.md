@@ -45,13 +45,29 @@ prefix was reconfigured, or it's nvm-managed instead of system-wide), set
 defaults in `docker-compose.prod.yml` — don't edit the compose file itself for
 a host-specific path.
 
-Auth for the CLI is separate from the binary: it reads `ANTHROPIC_API_KEY`
-from the container's own environment (set below), not from any host login
-session — the bind mount only supplies the executable, not credentials.
+**Auth is a Claude Pro plan login, not an API key.** Run `claude login` as
+`root` on the VPS once (interactively, over SSH — it opens a browser-auth
+flow) so the session lands at `/root/.claude/` and `/root/.claude.json`. The
+backend container then:
+
+- runs as `user: "0:0"` (root) instead of the Dockerfile's non-root `app`
+  user, and
+- bind-mounts `/root/.claude` and `/root/.claude.json` **read-write** (not
+  read-only, unlike the binary mounts above) — the CLI refreshes its session
+  tokens in these files periodically, and a read-only mount would let auth
+  silently expire the first time that refresh is attempted.
+
+This trades away the container's non-root isolation to reuse the host's login
+session. The alternative — create a dedicated non-root VPS user, log in as
+that user, and set the container's UID/GID to match it via `user:` — keeps
+the container non-root but adds a one-time VPS setup step; switch to it later
+if the root-container tradeoff stops being acceptable.
 
 If the CLI is ever upgraded on the VPS (`npm update -g @anthropic-ai/claude-code`),
 no image rebuild or redeploy is needed — the container picks it up on its next
-restart since the mount is live, not a copy.
+restart since the mount is live, not a copy. Re-running `claude login` (e.g.
+after a session is revoked) needs no container change either, for the same
+reason.
 
 ## Deploying (manual, every time)
 
@@ -72,7 +88,6 @@ Set these directly in the Dokploy app (never in GitHub Secrets — they're not r
 | `IMAGE_TAG` | yes | Commit SHA to deploy. This is the rollback lever — see below |
 | `BACKEND_PORT` | no (default `3001`) | Host-side port Dokploy/Traefik routes to |
 | `BRAINSTORM_ALLOWED_ORIGINS` | yes | Comma-separated exact origins the backend's CORS guard accepts |
-| `ANTHROPIC_API_KEY` | yes | Auth for the `claude` CLI the backend spawns (`src/claude-cli/spawn.ts`) — out of scope for the 2 CI secrets requested; set here only |
 | `CLAUDE_CLI_BIN` | no (default `/usr/local/bin/claude`) | Only set if the VPS's `which claude` differs from the default — see "`claude` CLI on the VPS" above |
 | `CLAUDE_CLI_LIB` | no (default `/usr/local/lib/node_modules/@anthropic-ai/claude-code`) | Only set if the VPS's `npm root -g` differs from the default |
 | `BACKEND_MEMORY_LIMIT` | no (default `512m`) | |
@@ -103,4 +118,4 @@ by themselves make the app safe to expose publicly:
 docker compose -f docker/docker-compose.dev.yml up --build
 ```
 
-Builds both images from source and runs them together with a stubbed `TTS_SIDECAR_URL` wiring already in place. Set `ANTHROPIC_API_KEY` in your shell (or an `--env-file`) before running if you need the `claude`-spawning routes to work.
+Builds both images from source and runs them together with a stubbed `TTS_SIDECAR_URL` wiring already in place. `claude`-spawning routes won't work in this dev compose unless you uncomment the bind-mount lines in `docker-compose.dev.yml` and point them at your own local `claude login` session (same read-write requirement as prod — see above).
